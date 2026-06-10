@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gluon-by-example"
+version = "0.1.0"
+description = "Learn Triton's Gluon by example - the same GPU kernels written in Triton and Gluon, benchmarked"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "triton>=3.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "matplotlib>=3.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
