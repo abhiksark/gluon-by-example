@@ -23,3 +23,23 @@ def check_elementwise_inputs(x: torch.Tensor, y: torch.Tensor) -> None:
         raise ValueError(f"dtype mismatch: {x.dtype} vs {y.dtype}")
     if not (x.is_contiguous() and y.is_contiguous()):
         raise ValueError("inputs must be contiguous")
+
+
+def check_softmax_inputs(x: torch.Tensor) -> None:
+    """Validates input for row-wise softmax kernels.
+
+    Args:
+        x: Input tensor.
+
+    Raises:
+        ValueError: If the input is not a 2-D, floating-point, contiguous
+            CUDA tensor.
+    """
+    if not x.is_cuda:
+        raise ValueError("input must be a CUDA tensor")
+    if x.ndim != 2:
+        raise ValueError(f"input must be 2-D, got {x.ndim}-D")
+    if not x.dtype.is_floating_point:
+        raise ValueError(f"input must be floating point, got {x.dtype}")
+    if not x.is_contiguous():
+        raise ValueError("input must be contiguous")
