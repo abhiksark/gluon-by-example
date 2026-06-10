@@ -1,0 +1,27 @@
+# tests/test_make_chart.py
+"""Tests for the shared benchmark chart generator."""
+
+import csv
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "tools"))
+
+from make_chart import make_bandwidth_chart  # noqa: E402
+
+
+def test_writes_png_from_results_csv(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["n", "provider", "gbps"])
+        writer.writeheader()
+        for n in (4096, 65536):
+            writer.writerow({"n": n, "provider": "triton", "gbps": 100.0})
+            writer.writerow({"n": n, "provider": "gluon", "gbps": 110.0})
+
+    out_path = tmp_path / "chart.png"
+    make_bandwidth_chart(csv_path, out_path, title="test chart")
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 1000  # a real PNG, not an empty file
