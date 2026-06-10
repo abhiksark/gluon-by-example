@@ -4,19 +4,21 @@
 import pytest
 import torch
 
+from gluon_by_example.gluon_impl.softmax import softmax as gluon_softmax
 from gluon_by_example.triton_impl.softmax import softmax as triton_softmax
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
-# Chapter 3 adds the Gluon implementation here.
 BACKENDS = {
     "triton": triton_softmax,
+    "gluon": gluon_softmax,
 }
 
 # Irregular shapes on purpose: (1823, 781) exercises the padding mask,
 # (1, 1) the degenerate row, (4096, 4096) a large power-of-2 row,
 # (4, 32768) covers the 16-warp path and the column-cap boundary.
-SHAPES = [(1, 1), (8, 1024), (1823, 781), (4096, 4096), (4, 32768)]
+# (16, 64) makes the Gluon layout larger than the row (lane replication).
+SHAPES = [(1, 1), (8, 1024), (1823, 781), (4096, 4096), (4, 32768), (16, 64)]
 
 
 @requires_cuda
