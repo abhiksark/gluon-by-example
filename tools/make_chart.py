@@ -15,13 +15,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 
-def make_bandwidth_chart(csv_path: Path, out_path: Path, title: str) -> None:
+def make_bandwidth_chart(
+    csv_path: Path, out_path: Path, title: str, xlabel: str = "elements"
+) -> None:
     """Renders a bandwidth-vs-size line chart from a results CSV.
 
     Args:
         csv_path: CSV with columns n (int), provider (str), gbps (float).
         out_path: Destination PNG path.
         title: Chart title (kernel name + GPU).
+        xlabel: X-axis label; defaults to "elements".
     """
     series: dict[str, list[tuple[int, float]]] = defaultdict(list)
     with open(csv_path) as f:
@@ -39,7 +42,7 @@ def make_bandwidth_chart(csv_path: Path, out_path: Path, title: str) -> None:
             label=provider,
         )
     ax.set_xscale("log", base=2)
-    ax.set_xlabel("elements")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("GB/s")
     ax.set_title(title)
     ax.legend()
@@ -54,8 +57,9 @@ def main() -> None:
     parser.add_argument("csv_path", type=Path)
     parser.add_argument("out_path", type=Path)
     parser.add_argument("--title", default="")
+    parser.add_argument("--xlabel", default="elements")
     args = parser.parse_args()
-    make_bandwidth_chart(args.csv_path, args.out_path, args.title)
+    make_bandwidth_chart(args.csv_path, args.out_path, args.title, args.xlabel)
 
 
 if __name__ == "__main__":

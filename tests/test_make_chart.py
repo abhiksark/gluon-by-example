@@ -25,3 +25,16 @@ def test_writes_png_from_results_csv(tmp_path):
 
     assert out_path.exists()
     assert out_path.stat().st_size > 1000  # a real PNG, not an empty file
+
+
+def test_accepts_custom_xlabel(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["n", "provider", "gbps"])
+        writer.writeheader()
+        writer.writerow({"n": 1024, "provider": "triton", "gbps": 100.0})
+
+    out_path = tmp_path / "chart.png"
+    make_bandwidth_chart(csv_path, out_path, title="test", xlabel="columns")
+
+    assert out_path.exists()
