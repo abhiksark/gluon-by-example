@@ -18,7 +18,7 @@ BACKENDS = {
 @requires_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("n", [1, 1024, 9999, 1 << 20])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_matches_torch(backend, n, dtype):
     x = torch.randn(n, device="cuda", dtype=dtype)
     y = torch.randn(n, device="cuda", dtype=dtype)

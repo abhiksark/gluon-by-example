@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "gluon-by-example"
 version = "0.1.0"
 description = "Learn Triton's Gluon by example - the same GPU kernels written in Triton and Gluon, benchmarked"
+license = "MIT"
+authors = [{ name = "Abhik Sarkar" }]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4",
@@ -17,6 +19,9 @@ dev = [
     "pytest>=8",
     "matplotlib>=3.8",
 ]
+
+[project.urls]
+Repository = "https://github.com/abhiksark/gluon-by-example"
 
 [tool.setuptools.packages.find]
 where = ["src"]
