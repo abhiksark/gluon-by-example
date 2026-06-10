@@ -5,12 +5,13 @@ import pytest
 import torch
 
 from gluon_by_example.triton_impl.vector_add import vector_add as triton_vector_add
+from gluon_by_example.gluon_impl.vector_add import vector_add as gluon_vector_add
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
-# Task 4 adds the gluon backend to this dict.
 BACKENDS = {
     "triton": triton_vector_add,
+    "gluon": gluon_vector_add,
 }
 
 
