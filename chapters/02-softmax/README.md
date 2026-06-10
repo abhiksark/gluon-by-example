@@ -45,8 +45,7 @@ Three things worth noticing:
   `max(x, -inf) = max(x)` and `exp(-inf) = 0`.
 - `tl.max` / `tl.sum` are **reductions across the block** — the first
   Triton feature with no elementwise analogue. The compiler picks the
-  shuffle/shared-memory strategy. (Remember that sentence when chapter 3
-  makes us do it by hand in Gluon.)
+  shuffle/shared-memory strategy. (Remember that sentence when we get to Gluon in chapter 3.)
 - Each program holds its whole row in registers, which caps the row width
   (we gate at 32768 columns). The official Triton tutorial's
   [persistent variant](https://github.com/triton-lang/triton/blob/main/python/tutorials/02-fused-softmax.py)
@@ -72,7 +71,7 @@ pytest tests/test_softmax.py -v        # correctness
 python chapters/02-softmax/bench.py    # regenerate CSV + chart
 ```
 
-Next: chapter 3 writes this same kernel in Gluon, where the layout and the
-reduction strategy stop being the compiler's decision and become yours.
+Next: [chapter 3](../03-softmax-gluon/) writes this same kernel in Gluon, where the layout — and how
+you spell the reductions — stops being the compiler's decision and becomes yours.
 
 *Written against Triton 3.7.0 (pip). Gluon is experimental; APIs move.*
