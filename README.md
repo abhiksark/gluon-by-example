@@ -27,7 +27,7 @@ Requires: NVIDIA GPU (Ampere or newer), CUDA PyTorch, Triton ≥ 3.7.
 | # | Kernel | Backends | Status |
 |---|--------|----------|--------|
 | [1](chapters/01-vector-add/) | vector add | Triton + Gluon | ✅ |
-| 2 | fused softmax | Triton | planned |
+| [2](chapters/02-softmax/) | fused softmax | Triton | ✅ |
 | 3 | softmax | Gluon | planned |
 | 4 | matmul | Triton | planned |
 | 5 | matmul | Gluon (cp.async + mma_v2) | planned |
