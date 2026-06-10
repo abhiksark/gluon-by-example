@@ -21,7 +21,7 @@ def _add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
 
 
 def vector_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Computes x + y elementwise on 1-D contiguous CUDA tensors.
+    """Computes x + y elementwise on contiguous CUDA tensors of equal shape.
 
     Args:
         x: CUDA tensor.
