@@ -3,6 +3,10 @@
 
 import torch
 
+# Dtypes verified against torch.softmax. fp8 is excluded: Triton cannot
+# compile fp8e4nv on consumer Ampere, and torch.softmax refuses fp8 outright.
+_SOFTMAX_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+
 
 def check_elementwise_inputs(x: torch.Tensor, y: torch.Tensor) -> None:
     """Validates inputs for elementwise binary kernels.
@@ -32,14 +36,17 @@ def check_softmax_inputs(x: torch.Tensor) -> None:
         x: Input tensor.
 
     Raises:
-        ValueError: If the input is not a 2-D, floating-point, contiguous
-            CUDA tensor.
+        ValueError: If the input is not a 2-D, contiguous CUDA tensor of a
+            supported floating dtype.
     """
     if not x.is_cuda:
         raise ValueError("input must be a CUDA tensor")
     if x.ndim != 2:
         raise ValueError(f"input must be 2-D, got {x.ndim}-D")
-    if not x.dtype.is_floating_point:
-        raise ValueError(f"input must be floating point, got {x.dtype}")
+    if x.dtype not in _SOFTMAX_DTYPES:
+        supported = ", ".join(str(d).removeprefix("torch.") for d in _SOFTMAX_DTYPES)
+        raise ValueError(
+            f"unsupported dtype {x.dtype}; supported floating dtypes: {supported}"
+        )
     if not x.is_contiguous():
         raise ValueError("input must be contiguous")

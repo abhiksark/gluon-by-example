@@ -22,7 +22,7 @@ SHAPES = [(1, 1), (8, 1024), (1823, 781), (4096, 4096), (4, 32768)]
 @requires_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("shape", SHAPES)
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16, torch.float64])
 def test_matches_torch(backend, shape, dtype):
     x = torch.randn(shape, device="cuda", dtype=dtype)
     out = BACKENDS[backend](x)

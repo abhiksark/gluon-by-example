@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from gluon_by_example._validation import check_elementwise_inputs, check_softmax_inputs
+from gluon_by_example._validation import check_elementwise_inputs, check_softmax_inputs, _SOFTMAX_DTYPES
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -75,4 +75,19 @@ def test_softmax_rejects_integer_dtype():
 def test_softmax_rejects_noncontiguous():
     x = torch.randn(128, 8, device="cuda").t()
     with pytest.raises(ValueError, match="contiguous"):
+        check_softmax_inputs(x)
+
+
+@requires_cuda
+@pytest.mark.parametrize("dtype", _SOFTMAX_DTYPES)
+def test_softmax_accepts_supported_float_dtypes(dtype):
+    x = torch.randn(8, 128, device="cuda").to(dtype)
+    check_softmax_inputs(x)  # must not raise
+
+
+@requires_cuda
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_softmax_rejects_fp8(dtype):
+    x = torch.randn(8, 128, device="cuda").to(dtype)
+    with pytest.raises(ValueError, match="unsupported"):
         check_softmax_inputs(x)

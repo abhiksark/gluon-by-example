@@ -31,10 +31,11 @@ def softmax(x: torch.Tensor) -> torch.Tensor:
 
     Each row is loaded once, normalized on-chip in float32, and written once —
     versus the ~8 memory passes of unfused eager softmax.
+    float64 inputs are accumulated in float32 too; expect fp32-level precision.
 
     Args:
-        x: 2-D, floating-point, contiguous CUDA tensor with at least 1 and
-            at most 32768 columns.
+        x: 2-D, contiguous CUDA tensor (float16/bfloat16/float32/float64)
+            with at least 1 and at most 32768 columns.
 
     Returns:
         New tensor of the same shape and dtype with softmax applied along
