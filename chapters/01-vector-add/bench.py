@@ -5,7 +5,6 @@ Usage: python chapters/01-vector-add/bench.py
 """
 
 import csv
-import re
 import sys
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from gluon_by_example.triton_impl.vector_add import vector_add as triton_add
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools"))
+from bench_utils import gpu_slug  # noqa: E402
 from make_chart import make_bandwidth_chart  # noqa: E402
 
 PROVIDERS = {
@@ -25,17 +25,6 @@ PROVIDERS = {
     "gluon": gluon_add,
 }
 SIZES = [2**i for i in range(12, 28, 2)]  # 4 Ki .. 64 Mi elements
-
-
-def gpu_slug() -> str:
-    """Returns a filesystem-safe slug derived from the CUDA device name.
-
-    Returns:
-        Lowercase alphanumeric slug with hyphens replacing non-alphanumeric
-        characters, e.g. ``nvidia-rtx-a6000``.
-    """
-    name = torch.cuda.get_device_name(0).lower()
-    return re.sub(r"[^a-z0-9]+", "-", name).strip("-")
 
 
 def main() -> None:
