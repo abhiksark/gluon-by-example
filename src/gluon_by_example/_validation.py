@@ -50,3 +50,42 @@ def check_softmax_inputs(x: torch.Tensor) -> None:
         )
     if not x.is_contiguous():
         raise ValueError("input must be contiguous")
+
+
+# Tensor-core dtypes verified against torch.matmul. fp32 is excluded on
+# purpose: tl.dot defaults to tf32 while torch defaults to ieee — comparing
+# them honestly is its own chapter-sized story.
+_MATMUL_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def check_matmul_inputs(a: torch.Tensor, b: torch.Tensor) -> None:
+    """Validates inputs for 2-D matmul kernels.
+
+    Args:
+        a: Left operand, shape (M, K).
+        b: Right operand, shape (K, N).
+
+    Raises:
+        ValueError: If the inputs are not 2-D, contiguous CUDA tensors of a
+            matching supported tensor-core dtype with compatible, non-empty
+            shapes.
+    """
+    if not (a.is_cuda and b.is_cuda):
+        raise ValueError("inputs must be CUDA tensors")
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError(f"inputs must be 2-D, got {a.ndim}-D and {b.ndim}-D")
+    if a.dtype != b.dtype:
+        raise ValueError(f"dtype mismatch: {a.dtype} vs {b.dtype}")
+    if a.dtype not in _MATMUL_DTYPES:
+        supported = ", ".join(str(d).removeprefix("torch.") for d in _MATMUL_DTYPES)
+        raise ValueError(
+            f"unsupported dtype {a.dtype}; supported tensor-core dtypes: {supported}"
+        )
+    if a.shape[1] != b.shape[0]:
+        raise ValueError(
+            f"inner dimensions mismatch: {tuple(a.shape)} @ {tuple(b.shape)}"
+        )
+    if min(a.shape) == 0 or min(b.shape) == 0:
+        raise ValueError("dimensions must be non-empty")
+    if not (a.is_contiguous() and b.is_contiguous()):
+        raise ValueError("inputs must be contiguous")
