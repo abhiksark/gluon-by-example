@@ -38,3 +38,18 @@ def test_accepts_custom_xlabel(tmp_path):
     make_bandwidth_chart(csv_path, out_path, title="test", xlabel="columns")
 
     assert out_path.exists()
+
+
+def test_accepts_custom_metric_column(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["n", "provider", "tflops"])
+        writer.writeheader()
+        writer.writerow({"n": 1024, "provider": "triton", "tflops": 50.0})
+
+    out_path = tmp_path / "chart.png"
+    make_bandwidth_chart(
+        csv_path, out_path, title="test", ycol="tflops", ylabel="TFLOP/s"
+    )
+
+    assert out_path.exists()
