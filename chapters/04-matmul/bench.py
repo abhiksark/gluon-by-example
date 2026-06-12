@@ -32,21 +32,38 @@ PROVIDERS = {
 
 
 def require_idle_gpu() -> None:
-    """Exits if any other process is using the GPU.
+    """Exits if any other process is using the benchmark GPU.
 
     A shared card throttles clocks and steals SMs; compute-bound numbers
-    measured that way are fiction, not benchmarks.
+    measured that way are fiction, not benchmarks. Only the device the
+    benchmark runs on is checked (the first CUDA_VISIBLE_DEVICES entry, or
+    GPU 0), so an idle card on a busy multi-GPU host still qualifies.
+    Set GBE_ALLOW_SHARED=1 to downgrade the refusal to a warning.
     """
-    out = subprocess.run(
-        ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+    gpus = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
         capture_output=True, text=True, check=True,
-    ).stdout.split()
-    others = [pid for pid in out if pid and int(pid) != os.getpid()]
+    ).stdout.strip().splitlines()
+    uuid_by_index = dict(line.split(", ") for line in gpus)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    target = uuid_by_index[visible.split(",")[0] if visible else "0"]
+    apps = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()
+    others = [
+        pid for pid, uuid in (line.split(", ") for line in apps if line)
+        if uuid == target and int(pid) != os.getpid()
+    ]
     if others:
-        sys.exit(
-            f"GPU is busy (other compute PIDs: {', '.join(others)}). "
-            "Benchmark refused: compute-bound numbers on a shared card are fiction."
-        )
+        msg = f"benchmark GPU is busy (other compute PIDs: {', '.join(others)})."
+        if os.environ.get("GBE_ALLOW_SHARED") == "1":
+            print(f"WARNING: {msg} Proceeding because GBE_ALLOW_SHARED=1; "
+                  "treat these numbers as indicative, not authoritative.",
+                  file=sys.stderr)
+        else:
+            sys.exit(f"{msg} Benchmark refused: compute-bound numbers "
+                     "on a shared card are fiction.")
 
 
 def main() -> None:
