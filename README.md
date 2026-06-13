@@ -30,7 +30,7 @@ Requires: NVIDIA GPU (Ampere or newer), CUDA PyTorch, Triton ≥ 3.7.
 | [2](chapters/02-softmax/) | fused softmax | Triton | ✅ |
 | [3](chapters/03-softmax-gluon/) | softmax | Gluon | ✅ |
 | [4](chapters/04-matmul/) | matmul | Triton | ✅ |
-| 5 | matmul | Gluon (cp.async + mma_v2) | planned |
+| [5](chapters/05-matmul-gluon/) | matmul | Gluon (mma_v2) | ✅ |
 | 6 | flash attention | Triton | planned |
 | 7 | flash attention | Gluon (TMA + warp specialization) | planned |
 
