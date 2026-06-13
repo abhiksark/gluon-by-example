@@ -1,9 +1,9 @@
 # chapters/05-matmul-gluon/bench.py
-"""Benchmarks matmul: Triton vs Gluon vs cuBLAS (torch.matmul), fp16 squares.
+"""Benchmarks matmul: Triton vs Gluon (floor + cp.async) vs cuBLAS, fp16 squares.
 
 Compute-bound kernels are sensitive to contention and thermals, so this script
 refuses to run while other processes hold the benchmark GPU. All sizes are
-divisible by the Gluon kernel's (128, 128, 64) tile.
+divisible by both Gluon tiles (the floor's K=64 and the pipelined kernel's K=32).
 
 Usage: python chapters/05-matmul-gluon/bench.py
 """
@@ -18,6 +18,7 @@ import torch
 import triton
 
 from gluon_by_example.gluon_impl.matmul import matmul as gluon_matmul
+from gluon_by_example.gluon_impl.matmul_pipelined import matmul as gluon_pipe_matmul
 from gluon_by_example.triton_impl.matmul import matmul as triton_matmul
 
 REPO = Path(__file__).resolve().parents[2]
@@ -31,6 +32,7 @@ PROVIDERS = {
     "torch": torch.matmul,
     "triton": triton_matmul,
     "gluon": gluon_matmul,
+    "gluon-pipe": gluon_pipe_matmul,
 }
 
 
@@ -97,7 +99,7 @@ def main() -> None:
     make_bandwidth_chart(
         csv_path,
         png_path,
-        title=f"matmul fp16: Triton vs Gluon vs cuBLAS — {torch.cuda.get_device_name(0)}",
+        title=f"matmul fp16: Triton vs Gluon (floor + cp.async) vs cuBLAS — {torch.cuda.get_device_name(0)}",
         xlabel="M = N = K",
         ycol="tflops",
         ylabel="TFLOP/s",

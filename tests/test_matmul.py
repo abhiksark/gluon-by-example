@@ -8,13 +8,15 @@ import triton
 from gluon_by_example.triton_impl.matmul import _CONFIGS, _matmul_kernel
 from gluon_by_example.triton_impl.matmul import matmul as triton_matmul
 from gluon_by_example.gluon_impl.matmul import matmul as gluon_matmul
+from gluon_by_example.gluon_impl.matmul_pipelined import matmul as gluon_pipe_matmul
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
-# Chapter 5 adds the Gluon implementation here.
+# Chapter 5 adds the Gluon implementations here.
 BACKENDS = {
     "triton": triton_matmul,
     "gluon": gluon_matmul,
+    "gluon-pipe": gluon_pipe_matmul,
 }
 
 # (M, K, N): degenerate single element, one tile, odd everything (masks on
@@ -119,3 +121,22 @@ def test_gluon_rejects_bf16():
     b = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="float16"):
         gluon_matmul(a, b)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", ALIGNED_SHAPES)
+def test_gluon_pipe_matches_ground_truth(shape):
+    m, k, n = shape
+    a = torch.randn(m, k, device="cuda", dtype=torch.float16)
+    b = torch.randn(k, n, device="cuda", dtype=torch.float16)
+    out = gluon_pipe_matmul(a, b)
+    torch.testing.assert_close(
+        out.double(), a.double() @ b.double(), **TOLS[torch.float16])
+
+
+@requires_cuda
+def test_gluon_pipe_rejects_unaligned():
+    a = torch.randn(130, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(64, 128, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="tile-aligned"):
+        gluon_pipe_matmul(a, b)
