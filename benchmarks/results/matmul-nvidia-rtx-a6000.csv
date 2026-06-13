@@ -1,0 +1,13 @@
+n,provider,tflops
+256,torch,5.16
+256,triton,5.46
+512,torch,31.0
+512,triton,30.6
+1024,torch,85.96
+1024,triton,77.18
+2048,torch,103.99
+2048,triton,100.34
+4096,torch,112.06
+4096,triton,108.96
+8192,torch,107.65
+8192,triton,110.7
