@@ -29,7 +29,7 @@ def _softmax_kernel(x_ptr, out_ptr, row_stride, n_cols, BLOCK: tl.constexpr):
 def softmax(x: torch.Tensor) -> torch.Tensor:
     """Computes row-wise softmax of a 2-D CUDA tensor in one fused kernel.
 
-    Each row is loaded once, normalized on-chip in float32, and written once —
+    Each row is loaded once, normalized on-chip in float32, and written once,
     versus the ~8 memory passes of unfused eager softmax.
     float64 inputs are accumulated in float32 too; expect fp32-level precision.
 

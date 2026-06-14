@@ -71,7 +71,7 @@ def softmax(x: torch.Tensor) -> torch.Tensor:
         num_warps = 16
     # A hand-chosen layout: each thread owns one contiguous run of the row.
     # The run is capped at 16 bytes so consecutive lanes stay 16B apart and
-    # warp loads coalesce — uncapped runs (e.g. 128B at BLOCK=16384) scatter
+    # warp loads coalesce. Uncapped runs (e.g. 128B at BLOCK=16384) scatter
     # each warp access across 32 cache lines and cost ~11% at wide rows.
     # This is the same dtype-width logic Triton's layout inference applies.
     # For rows narrower than the CTA's 32 * num_warps lanes the layout is
