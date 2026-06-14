@@ -1,7 +1,7 @@
 # Gluon by Example
 
-**Learn [Triton](https://github.com/triton-lang/triton)'s Gluon — the new
-low-level GPU kernel language — by writing the same kernels in Triton and
+**Learn [Triton](https://github.com/triton-lang/triton)'s Gluon, the new
+low-level GPU kernel language, by writing the same kernels in Triton and
 Gluon side by side, and benchmarking both.**
 
 > Not MXNet Gluon. Not GluonHQ/JavaFX. This is about
@@ -46,7 +46,7 @@ Verified against the official Gluon tutorial gates (Triton main, 2026-06):
 | tcgen05 / tensor memory | CC major == 10 (sm_100) | ❌ | ❌ | ❌ | ✅ |
 
 (Yes, wgmma is Hopper-*only* and tcgen05 is datacenter-Blackwell-only.
-Consumer Blackwell has neither — it has TMA. This table took actual source
+Consumer Blackwell has neither: it has TMA. This table took actual source
 reading to assemble; that's why it's here.)
 
 ## Gluon resources

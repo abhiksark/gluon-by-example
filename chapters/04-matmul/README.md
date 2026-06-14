@@ -1,6 +1,6 @@
-# Chapter 4: Matmul in Triton — Tiling and Autotune
+# Chapter 4: Matmul in Triton: Tiling and Autotune
 
-Chapters 1-3 were bandwidth-bound and hand-launched — we picked the block size
+Chapters 1-3 were bandwidth-bound and hand-launched; we picked the block size
 and the warp count ourselves. Matmul is the first **compute-bound** kernel, and
 the first where autotuning earns its keep: the right tile shape is not obvious,
 so we let the machine find it.
@@ -29,7 +29,7 @@ for k in range(0, tl.cdiv(K, BLOCK_K)):
     b_ptrs += BLOCK_K * stride_bk
 ```
 
-The inputs are fp16/bf16 — that is what feeds the tensor cores — but every
+The inputs are fp16/bf16 (that is what feeds the tensor cores), but every
 partial product lands in fp32. Summing thousands of low-precision products in
 low precision would bleed bits on every add. Accumulating in fp32 keeps the
 running sum honest; we downcast exactly once, after the loop closes:
@@ -39,7 +39,7 @@ running sum honest; we downcast exactly once, after the loop closes:
 c = acc.to(c_ptr.dtype.element_ty)
 ```
 
-One downcast, at the end — not per chunk.
+One downcast, at the end, not per chunk.
 
 ### Grouped, L2-friendly program ordering
 
@@ -58,7 +58,7 @@ pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
 pid_n = (pid % num_pid_in_group) // group_size_m
 ```
 
-Same arithmetic, same result — only the *order* in which tiles are computed
+Same arithmetic, same result; only the *order* in which tiles are computed
 changes. But order is what decides whether a B column is still warm in L2 when
 the next program asks for it. With `GROUP_M = 8`, eight neighboring `pid_m`
 rows share each B column before it ages out.
@@ -89,7 +89,7 @@ kernel comment:
 ```
 
 The biggest config rides right up to the A6000's shared-memory ceiling. A card
-with a smaller budget cannot launch it — but a config that fails to launch is
+with a smaller budget cannot launch it, but a config that fails to launch is
 scored as `inf` and dropped from the race, so the autotuner simply picks the
 best one that *does* fit. The list never has to be GPU-specific.
 
@@ -98,15 +98,15 @@ best one that *does* fit. The list never has to be GPU-specific.
 ## A note on correctness
 
 The tests do not check against cuBLAS. They check against the **fp64 product**
-of the same inputs — the mathematically true answer:
+of the same inputs, the mathematically true answer:
 
 ```python
 torch.testing.assert_close(out.double(), a.double() @ b.double(), **TOLS[dtype])
 ```
 
 The reasoning, paraphrased from the test file: cuBLAS is itself ~1-2
-output-ulps from the true answer — on bf16, farther from truth than this
-kernel — so it is too noisy to serve as a reference. Comparing one approximate
+output-ulps from the true answer (on bf16, farther from truth than this
+kernel), so it is too noisy to serve as a reference. Comparing one approximate
 matmul against another tells you they disagree, not which one is right. The
 fp64 product is the fixed point both are approximating, so that is what we
 measure against. With fp32 accumulation and a single downcast, the kernel stays
@@ -130,11 +130,11 @@ Measured on the RTX A6000, fp16, square `N × N` matmuls:
 | 4096 | 112.06 | 108.96 |
 | 8192 | 107.65 | 110.7 |
 
-The honest verdict: cuBLAS is the better-rounded library across the mid-sizes —
-at 1024 it leads 85.96 to 77.18 — but the gap closes as the problem grows, and
+The honest verdict: cuBLAS is the better-rounded library across the mid-sizes
+(at 1024 it leads 85.96 to 77.18), but the gap closes as the problem grows, and
 at the largest size the autotuned kernel pulls ahead: at `N=8192`, Triton hits
 110.7 TFLOP/s against cuBLAS's 107.65. A few hundred lines of tiling and a
-six-config search match a vendor library where it matters most — on the big
+six-config search match a vendor library where it matters most: on the big
 tiles.
 
 ---
@@ -146,6 +146,6 @@ pytest tests/test_matmul.py -q
 python chapters/04-matmul/bench.py
 ```
 
-Next: chapter 5 hands the same matmul to Gluon — explicit layouts and mma_v2, and an honest look at whether hand control beats the compiler.
+Next: chapter 5 hands the same matmul to Gluon (explicit layouts and mma_v2) and an honest look at whether hand control beats the compiler.
 
 *Written against Triton 3.7.0 (pip). Gluon is experimental; APIs move.*
