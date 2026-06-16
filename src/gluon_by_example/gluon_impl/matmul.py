@@ -1,7 +1,7 @@
 # src/gluon_by_example/gluon_impl/matmul.py
 """Tiled matmul in Gluon: explicit layouts + mma_v2, no async pipeline.
 
-This is the floor kernel from the matmul-5090 experiment — plain gl.load tiles
+This is the floor kernel from the matmul-5090 experiment: plain gl.load tiles
 feeding mma_v2 with fp32 accumulation. It is the honest best-Gluon result: on
 the 5090 it reached 0.80x of Triton, and adding cp.async/TMA pipelining (see the
 article) made it slower, not faster. The chapter's point is the layout/mma
@@ -53,7 +53,7 @@ def _matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
 def matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Computes a @ b in Gluon for tile-aligned float16 inputs.
 
-    Contract (narrow on purpose — see module docstring): a is (M, K) and b is
+    Contract (narrow on purpose, see module docstring): a is (M, K) and b is
     (K, N), both float16, CUDA, contiguous, with M and N divisible by 128 and K
     divisible by 64. Accumulates in float32, returns float16.
 
