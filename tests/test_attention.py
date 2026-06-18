@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from gluon_by_example._validation import check_attention_inputs
+from gluon_by_example.gluon_impl import attention as ga
 from gluon_by_example.triton_impl import attention as ta
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -39,11 +40,12 @@ def _ref(q, k, v, causal):
 
 
 @requires_cuda
+@pytest.mark.parametrize("backend", [ta, ga], ids=["triton", "gluon"])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("shape", SHAPES)
-def test_triton_forward_matches_sdpa(shape, causal):
+def test_forward_matches_sdpa(shape, causal, backend):
     q, k, v = (torch.randn(shape, device="cuda", dtype=torch.float16) for _ in range(3))
-    out = ta.attention(q, k, v, causal=causal)
+    out = backend.attention(q, k, v, causal=causal)
     ref = _ref(q, k, v, causal)
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
