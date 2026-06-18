@@ -1,0 +1,15 @@
+n,provider,us
+100,eager,9.299
+100,graph,4.176
+200,eager,8.546
+200,graph,1.941
+500,eager,7.978
+500,graph,1.673
+1000,eager,7.97
+1000,graph,2.97
+2000,eager,7.997
+2000,graph,1.648
+5000,eager,8.035
+5000,graph,1.698
+10000,eager,7.953
+10000,graph,1.663
