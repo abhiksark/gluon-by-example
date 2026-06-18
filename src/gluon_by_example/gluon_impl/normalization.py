@@ -18,7 +18,7 @@ dw / db (weight gradients): two-stage grouped-partial only -- no atomic_add.
     Stage 2 (_dw_reduce_kernel): sum the partial buffer's rows into [n_cols].
     This is the climb form; the atomic floor stays Triton-only.
 
-UNVERIFIED calls (flagged inline and summarized in P6-report.md):
+UNVERIFIED calls (flagged inline; confirm on a GPU run):
   - UNVERIFIED_SCALAR_STORE: gl.store of a scalar (mean, rstd) at a scalar
     pointer offset -- forward-only pattern, not changed here.
   - UNVERIFIED_SCALAR_LOAD: gl.load of a scalar (mean, rstd) inside the
