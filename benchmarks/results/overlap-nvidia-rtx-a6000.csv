@@ -1,0 +1,15 @@
+n,provider,gbps
+1,serial,6.2
+1,overlap,26.4
+2,serial,6.2
+2,overlap,31.5
+4,serial,6.2
+4,overlap,34.2
+8,serial,6.2
+8,overlap,36.3
+16,serial,6.2
+16,overlap,36.8
+32,serial,6.2
+32,overlap,36.5
+64,serial,6.2
+64,overlap,35.7
