@@ -51,14 +51,15 @@ def test_forward_matches_sdpa(shape, causal, backend):
 
 
 @requires_cuda
+@pytest.mark.parametrize("backend", [ta, ga], ids=["triton", "gluon"])
 @pytest.mark.parametrize("causal", [False, True])
-def test_triton_backward_matches_autograd(causal):
+def test_backward_matches_autograd(causal, backend):
     shape = (2, 2, 128, 64)
     q, k, v = (torch.randn(shape, device="cuda", dtype=torch.float32,
                            requires_grad=True) for _ in range(3))
     qr, kr, vr = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
     g = torch.randn(shape, device="cuda", dtype=torch.float32)
-    ta.attention(q, k, v, causal=causal).backward(g)
+    backend.attention(q, k, v, causal=causal).backward(g)
     _ref(qr, kr, vr, causal).backward(g)
     for a, e in ((q, qr), (k, kr), (v, vr)):
         torch.testing.assert_close(a.grad, e.grad, atol=2e-2, rtol=2e-2)
