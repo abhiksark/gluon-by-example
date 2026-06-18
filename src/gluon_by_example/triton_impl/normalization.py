@@ -119,7 +119,7 @@ def _ln_dw_atomic_kernel(dy_ptr, x_ptr, mean_ptr, rstd_ptr, dw_ptr, db_ptr,
     x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
     mean = tl.load(mean_ptr + row)
     rstd = tl.load(rstd_ptr + row)
-    x_hat = (x - mean) * rstd
+    x_hat = tl.where(mask, (x - mean) * rstd, 0.0)
     tl.atomic_add(dw_ptr + cols, dy * x_hat, mask=mask)
     tl.atomic_add(db_ptr + cols, dy, mask=mask)
 
@@ -133,7 +133,7 @@ def _rms_dw_atomic_kernel(dy_ptr, x_ptr, rstd_ptr, dw_ptr,
     dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
     x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
     rstd = tl.load(rstd_ptr + row)
-    x_hat = x * rstd
+    x_hat = tl.where(mask, x * rstd, 0.0)
     tl.atomic_add(dw_ptr + cols, dy * x_hat, mask=mask)
 
 
