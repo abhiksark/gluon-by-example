@@ -34,6 +34,13 @@ CONCERNS (flagged, not silently guessed):
      of the NVMMADistributed fp32 tile to fp16 before the second mma_v2 is
      idiomatic from the Triton twin but Gluon's .to() on distributed layouts may
      carry caveats not visible from static inspection.
+  5. gl.where masking with a row_layout-derived condition applied to acc_layout
+     operands: the padding mask (offs_n[None, :] < N) and causal mask
+     (offs_m[:, None] >= offs_n[None, :]) are built from row_layout arange
+     vectors, but the true/false branches are acc_layout (NVMMADistributedLayout)
+     tensors. Whether gl.where accepts a condition whose layout differs from
+     the operand layout, and how it broadcasts the 1-D row_layout index across
+     the 2-D acc_layout tile, is unverified without a live Gluon runtime.
 """
 
 import math
@@ -46,7 +53,7 @@ from triton.experimental.gluon.language.nvidia.ampere import mma_v2
 from gluon_by_example._validation import check_attention_inputs
 
 _BLOCK = 64   # BLOCK_M == BLOCK_N keeps causal block alignment exact, matches Triton twin
-_NUM_WARPS = 4
+_NUM_WARPS = 4  # 64x64 attention tile; matmul.py uses 8 warps for its 128x128 tile
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +131,11 @@ def _attn_fwd_kernel(
         )
         # Scale and apply padding mask (out-of-bounds columns become -inf).
         qk = qk * sm_scale
-        # CONCERN: applying an elementwise scalar multiply to acc_layout tensor
-        # is assumed to be valid for NVMMADistributedLayout.
+        # CONCERN 5: gl.where mixes a condition derived from row_layout arange
+        # vectors (offs_n[None, :] < N) with acc_layout (NVMMADistributedLayout)
+        # operands.  Whether Gluon accepts a cross-layout condition and how it
+        # broadcasts the 1-D row_layout index across the 2-D acc_layout tile is
+        # unverified without a GPU run.
         qk_masked = gl.where(
             offs_n[None, :] < N,
             qk,
