@@ -89,3 +89,46 @@ def check_matmul_inputs(a: torch.Tensor, b: torch.Tensor) -> None:
         raise ValueError("dimensions must be non-empty")
     if not (a.is_contiguous() and b.is_contiguous()):
         raise ValueError("inputs must be contiguous")
+
+
+# Tensor-core dtypes for attention; head_dim must be a power of two the
+# kernel can tile as a constexpr.
+_ATTENTION_DTYPES = (torch.float16, torch.bfloat16)
+_ATTENTION_HEAD_DIMS = (16, 32, 64, 128)
+
+
+def check_attention_inputs(q: torch.Tensor, k: torch.Tensor,
+                           v: torch.Tensor) -> None:
+    """Validates inputs for 4-D (Z, H, N, D) attention kernels.
+
+    Args:
+        q: Queries, shape (Z, H, N, D).
+        k: Keys, same shape and dtype as q.
+        v: Values, same shape and dtype as q.
+
+    Raises:
+        ValueError: If the tensors are not 4-D, contiguous, equal-shaped CUDA
+            tensors of a matching tensor-core dtype with a supported head_dim.
+    """
+    for name, t in (("q", q), ("k", k), ("v", v)):
+        if not t.is_cuda:
+            raise ValueError(f"{name} must be a CUDA tensor")
+        if t.ndim != 4:
+            raise ValueError(f"{name} must be 4-D (Z, H, N, D), got {t.ndim}-D")
+        if not t.is_contiguous():
+            raise ValueError(f"{name} must be contiguous")
+    if not (q.shape == k.shape == v.shape):
+        raise ValueError(
+            f"shape mismatch: {tuple(q.shape)} {tuple(k.shape)} {tuple(v.shape)}"
+        )
+    if not (q.dtype == k.dtype == v.dtype):
+        raise ValueError(
+            f"dtype mismatch: {q.dtype} {k.dtype} {v.dtype}"
+        )
+    if q.dtype not in _ATTENTION_DTYPES:
+        supported = ", ".join(str(d).removeprefix("torch.") for d in _ATTENTION_DTYPES)
+        raise ValueError(f"unsupported dtype {q.dtype}; supported: {supported}")
+    if q.shape[-1] not in _ATTENTION_HEAD_DIMS:
+        raise ValueError(
+            f"head_dim {q.shape[-1]} unsupported; must be one of {_ATTENTION_HEAD_DIMS}"
+        )
