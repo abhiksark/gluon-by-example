@@ -15,6 +15,7 @@ from gluon_by_example._validation import check_normalization_inputs
 
 _MAX_COLS = 32768
 _dw_mode = "atomic"  # P4 adds "partial"
+_GROUP_M = 64  # partial accumulator rows; tune vs row count
 
 
 def _launch_meta(n_cols):
@@ -137,12 +138,99 @@ def _rms_dw_atomic_kernel(dy_ptr, x_ptr, rstd_ptr, dw_ptr,
     tl.atomic_add(dw_ptr + cols, dy * x_hat, mask=mask)
 
 
+def set_dw_mode(mode):
+    """Select the weight-gradient reduction: 'atomic' (floor) or 'partial'."""
+    global _dw_mode
+    if mode not in ("atomic", "partial"):
+        raise ValueError(f"dw mode must be 'atomic' or 'partial', got {mode!r}")
+    _dw_mode = mode
+
+
+@triton.jit
+def _ln_dw_partial_kernel(dy_ptr, x_ptr, mean_ptr, rstd_ptr, pdw_ptr, pdb_ptr,
+                          row_stride, n_rows, n_cols, GROUP_M: tl.constexpr,
+                          BLOCK: tl.constexpr):
+    # Each of GROUP_M programs owns one partial row and sums every
+    # GROUP_M-th input row into it. No atomics: rows never collide.
+    g = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    acc_w = tl.zeros([BLOCK], dtype=tl.float32)
+    acc_b = tl.zeros([BLOCK], dtype=tl.float32)
+    row = g
+    while row < n_rows:
+        dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+        mean = tl.load(mean_ptr + row)
+        rstd = tl.load(rstd_ptr + row)
+        x_hat = (x - mean) * rstd
+        acc_w += dy * x_hat
+        acc_b += dy
+        row += GROUP_M
+    tl.store(pdw_ptr + g * n_cols + cols, acc_w, mask=mask)
+    tl.store(pdb_ptr + g * n_cols + cols, acc_b, mask=mask)
+
+
+@triton.jit
+def _rms_dw_partial_kernel(dy_ptr, x_ptr, rstd_ptr, pdw_ptr,
+                           row_stride, n_rows, n_cols, GROUP_M: tl.constexpr,
+                           BLOCK: tl.constexpr):
+    g = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    acc_w = tl.zeros([BLOCK], dtype=tl.float32)
+    row = g
+    while row < n_rows:
+        dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+        rstd = tl.load(rstd_ptr + row)
+        acc_w += dy * (x * rstd)
+        row += GROUP_M
+    tl.store(pdw_ptr + g * n_cols + cols, acc_w, mask=mask)
+
+
+@triton.jit
+def _dw_reduce_kernel(partial_ptr, out_ptr, group_m, n_cols, BLOCK: tl.constexpr):
+    # Sum a [group_m, n_cols] partial buffer down to [n_cols], one program
+    # per column tile.
+    col = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = col < n_cols
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for g in range(group_m):
+        acc += tl.load(partial_ptr + g * n_cols + col, mask=mask, other=0.0)
+    tl.store(out_ptr + col, acc, mask=mask)
+
+
+def _reduce_partials(partial, n_cols):
+    out = torch.empty(n_cols, device=partial.device, dtype=torch.float32)
+    block = 256
+    grid = (triton.cdiv(n_cols, block),)
+    _dw_reduce_kernel[grid](partial, out, partial.shape[0], n_cols, BLOCK=block)
+    return out
+
+
 def _ln_dw_partial(dy, x, mean, rstd, dw, db):
-    raise NotImplementedError  # implemented in P4
+    n_rows, n_cols = x.shape
+    block, num_warps = _launch_meta(n_cols)
+    group = min(_GROUP_M, n_rows)
+    pdw = torch.zeros(group, n_cols, device=x.device, dtype=torch.float32)
+    pdb = torch.zeros(group, n_cols, device=x.device, dtype=torch.float32)
+    _ln_dw_partial_kernel[(group,)](
+        dy, x, mean, rstd, pdw, pdb, x.stride(0), n_rows, n_cols,
+        GROUP_M=group, BLOCK=block, num_warps=num_warps)
+    dw.copy_(_reduce_partials(pdw, n_cols))
+    db.copy_(_reduce_partials(pdb, n_cols))
 
 
 def _rms_dw_partial(dy, x, rstd, dw):
-    raise NotImplementedError  # implemented in P4
+    n_rows, n_cols = x.shape
+    block, num_warps = _launch_meta(n_cols)
+    group = min(_GROUP_M, n_rows)
+    pdw = torch.zeros(group, n_cols, device=x.device, dtype=torch.float32)
+    _rms_dw_partial_kernel[(group,)](
+        dy, x, rstd, pdw, x.stride(0), n_rows, n_cols,
+        GROUP_M=group, BLOCK=block, num_warps=num_warps)
+    dw.copy_(_reduce_partials(pdw, n_cols))
 
 
 def _ln_weight_grads(dy, x, mean, rstd, dtype):

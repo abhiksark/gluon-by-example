@@ -11,6 +11,14 @@ from gluon_by_example.triton_impl import normalization as tn
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
+@pytest.fixture(params=["atomic", "partial"])
+def dw_mode(request):
+    prev = tn._dw_mode
+    tn.set_dw_mode(request.param)
+    yield request.param
+    tn.set_dw_mode(prev)
+
+
 def test_validation_rejects_cpu():
     with pytest.raises(ValueError, match="CUDA"):
         check_normalization_inputs(torch.randn(4, 8), torch.randn(8))
@@ -67,7 +75,7 @@ def test_rmsnorm_forward_matches_torch(shape, dtype):
 
 @requires_cuda
 @pytest.mark.parametrize("shape", [(64, 256), (1823, 781), (16, 64)])
-def test_layernorm_backward_matches_autograd(shape):
+def test_layernorm_backward_matches_autograd(shape, dw_mode):
     m, n = shape
     x = torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
     w = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
@@ -82,7 +90,7 @@ def test_layernorm_backward_matches_autograd(shape):
 
 @requires_cuda
 @pytest.mark.parametrize("shape", [(64, 256), (1823, 781), (16, 64)])
-def test_rmsnorm_backward_matches_autograd(shape):
+def test_rmsnorm_backward_matches_autograd(shape, dw_mode):
     m, n = shape
     x = torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
     w = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
