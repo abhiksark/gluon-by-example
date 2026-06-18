@@ -75,3 +75,25 @@ Next: [chapter 3](../03-softmax-gluon/) writes this same kernel in Gluon, where 
 you spell the reductions) stops being the compiler's decision and becomes yours.
 
 *Written against Triton 3.7.0 (pip). Gluon is experimental; APIs move.*
+
+---
+
+## Bonus: the running sum is a scan
+
+The softmax denominator `sum(exp(x - x_max))` is a **reduction**: one pass
+over a row produces a single scalar. A reduction is a degenerate case of a
+more general primitive: the **prefix scan** (also called prefix sum or
+cumulative sum), where each output element is the aggregate of all inputs up
+to and including that position.
+
+Formally: given a sequence `[a0, a1, ..., a_{n-1}]` and an associative
+operator, the inclusive prefix scan produces `[a0, a0+a1, ..., sum(a_i)]`.
+The last element of the inclusive scan is the reduction. Scans appear in
+sorting, sparse matmul, histogram equalization, and RNN gating; they are the
+building block wherever a sequential dependency must be parallelized.
+
+The Triton implementation lives in:
+[`src/gluon_by_example/triton_impl/scan.py`](../../src/gluon_by_example/triton_impl/scan.py)
+
+Correctness tests:
+[`tests/test_scan.py`](../../tests/test_scan.py)
