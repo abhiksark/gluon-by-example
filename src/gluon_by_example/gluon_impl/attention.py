@@ -90,6 +90,16 @@ CONCERNS (flagged, not silently guessed):
       accumulation. Whether Gluon's .to(gl.float16) on an acc_layout_nt tile
       correctly re-materialises a DotOperandLayout-compatible representation
       before convert_layout is applied is unverified.
+  15. Operand-layout parent matching across all backward mma_v2 calls (review
+      I1, GPU-UNVERIFIED): every gl.convert_layout(operand, *_layout) call must
+      use a DotOperandLayout whose parent is the accumulator of THAT mma_v2
+      call. The dV and dK mma_v2s in _attn_bwd_dkdv_kernel (accumulate into
+      acc_layout_nd) were previously using lhs_layout_nt (parent=acc_layout_nt);
+      this has been corrected to lhs_layout_nd. The fix is statically consistent
+      but the parent-matching contract for DotOperandLayout is the area of the
+      Gluon experimental API most likely to require rework on the first live GPU
+      run. All three backward kernels' mma_v2 operand parents should be
+      re-verified against the Gluon runtime when GPU access is available.
 """
 
 import math
@@ -357,6 +367,9 @@ def _attn_bwd_dkdv_kernel(
         m_mask = offs_m < N
 
         # Load Q tile: (BLOCK_M, D).
+        # NOTE (bandwidth opt, GPU rework): Q is loaded twice per iteration --
+        # once here as q_tile (row-major) and once below as qt_tile (transposed
+        # strides). A single load + in-register transpose would halve Q bandwidth.
         q_tile = gl.load(
             Q + off_b * stride_b + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d,
             mask=m_mask[:, None],
@@ -409,8 +422,10 @@ def _attn_bwd_dkdv_kernel(
 
         # dV += P^T @ dO: (BLOCK_N, D).
         # CONCERN 14: pT.to(gl.float16) on an acc_layout_nt tile before mma_v2.
+        # Operand layouts must be parented to the accumulator of THIS mma_v2 call
+        # (dv, which is acc_layout_nd), not to acc_layout_nt.
         dv = mma_v2(
-            gl.convert_layout(pT.to(gl.float16), lhs_layout_nt),
+            gl.convert_layout(pT.to(gl.float16), lhs_layout_nd),
             gl.convert_layout(do_tile, rhs_layout_nd),
             dv,
         )
@@ -439,8 +454,10 @@ def _attn_bwd_dkdv_kernel(
 
         # dK += dS^T @ Q: (BLOCK_N, D).
         # CONCERN 14: dsT.to(gl.float16) on acc_layout_nt before mma_v2.
+        # Operand layouts must be parented to the accumulator of THIS mma_v2 call
+        # (dk, which is acc_layout_nd), not to acc_layout_nt.
         dk = mma_v2(
-            gl.convert_layout(dsT.to(gl.float16), lhs_layout_nt),
+            gl.convert_layout(dsT.to(gl.float16), lhs_layout_nd),
             gl.convert_layout(q_tile, rhs_layout_nd),
             dk,
         )
