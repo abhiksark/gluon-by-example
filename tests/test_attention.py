@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from gluon_by_example._validation import check_attention_inputs
+from gluon_by_example.triton_impl import attention as ta
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -29,9 +30,6 @@ def test_validation_rejects_shape_mismatch():
     k = torch.randn(1, 1, 9, 64, device="cuda", dtype=torch.float16)
     with pytest.raises(ValueError, match="shape"):
         check_attention_inputs(q, k, q)
-
-
-from gluon_by_example.triton_impl import attention as ta  # noqa: E402
 
 SHAPES = [(2, 2, 128, 64), (1, 1, 200, 64), (2, 4, 64, 32)]
 

@@ -58,10 +58,10 @@ def _attn_fwd_kernel(Q, K, V, O, L, sm_scale,  # noqa: E741
         m_i = m_ij
 
     acc = acc / l_i[:, None]
-    l = m_i + tl.log(l_i)  # noqa: E741
+    lse = m_i + tl.log(l_i)
     o_ptrs = O + off_b * stride_ob + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od
     tl.store(o_ptrs, acc.to(O.dtype.element_ty), mask=offs_m[:, None] < N)
-    tl.store(L + off_b * N + offs_m, l, mask=offs_m < N)
+    tl.store(L + off_b * N + offs_m, lse, mask=offs_m < N)
 
 
 def _shape3(t):
