@@ -76,29 +76,37 @@ def test_rmsnorm_forward_matches_torch(backend, shape, dtype):
 
 
 @requires_cuda
+@pytest.mark.parametrize("backend", [tn, gn], ids=["triton", "gluon"])
 @pytest.mark.parametrize("shape", [(64, 256), (1823, 781), (16, 64)])
-def test_layernorm_backward_matches_autograd(shape, dw_mode):
+def test_layernorm_backward_matches_autograd(backend, shape, dw_mode):
+    # Gluon always uses two-stage partial; skip the atomic parametrization.
+    if backend is gn and dw_mode == "atomic":
+        pytest.skip("gluon has no atomic floor; two-stage only")
     m, n = shape
     x = torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
     w = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
     b = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
     xr, wr, br = (t.detach().clone().requires_grad_(True) for t in (x, w, b))
     g = torch.randn(shape, device="cuda", dtype=torch.float64)
-    tn.layer_norm(x, w, b).backward(g)
+    backend.layer_norm(x, w, b).backward(g)
     F.layer_norm(xr, (n,), wr, br, eps=1e-5).backward(g)
     for a, e in ((x, xr), (w, wr), (b, br)):
         torch.testing.assert_close(a.grad, e.grad, atol=1e-6, rtol=1e-5)
 
 
 @requires_cuda
+@pytest.mark.parametrize("backend", [tn, gn], ids=["triton", "gluon"])
 @pytest.mark.parametrize("shape", [(64, 256), (1823, 781), (16, 64)])
-def test_rmsnorm_backward_matches_autograd(shape, dw_mode):
+def test_rmsnorm_backward_matches_autograd(backend, shape, dw_mode):
+    # Gluon always uses two-stage partial; skip the atomic parametrization.
+    if backend is gn and dw_mode == "atomic":
+        pytest.skip("gluon has no atomic floor; two-stage only")
     m, n = shape
     x = torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
     w = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
     xr, wr = (t.detach().clone().requires_grad_(True) for t in (x, w))
     g = torch.randn(shape, device="cuda", dtype=torch.float64)
-    tn.rms_norm(x, w).backward(g)
+    backend.rms_norm(x, w).backward(g)
     (_rms_ref(xr, wr, 1e-5)).backward(g)
     for a, e in ((x, xr), (w, wr)):
         torch.testing.assert_close(a.grad, e.grad, atol=1e-6, rtol=1e-5)
