@@ -55,11 +55,14 @@ def test_forward_matches_sdpa(shape, causal, backend):
 @pytest.mark.parametrize("causal", [False, True])
 def test_backward_matches_autograd(causal, backend):
     shape = (2, 2, 128, 64)
-    q, k, v = (torch.randn(shape, device="cuda", dtype=torch.float32,
+    # fp16 required: check_attention_inputs rejects float32 (tensor-core dtypes only).
+    q, k, v = (torch.randn(shape, device="cuda", dtype=torch.float16,
                            requires_grad=True) for _ in range(3))
     qr, kr, vr = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
-    g = torch.randn(shape, device="cuda", dtype=torch.float32)
+    # g must match the fp16 output dtype.
+    g = torch.randn(shape, device="cuda", dtype=torch.float16)
     backend.attention(q, k, v, causal=causal).backward(g)
     _ref(qr, kr, vr, causal).backward(g)
+    # fp16 backward tolerance: may need further loosening on first real GPU run.
     for a, e in ((q, qr), (k, kr), (v, vr)):
         torch.testing.assert_close(a.grad, e.grad, atol=2e-2, rtol=2e-2)

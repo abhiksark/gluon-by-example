@@ -100,6 +100,20 @@ CONCERNS (flagged, not silently guessed):
       Gluon experimental API most likely to require rework on the first live GPU
       run. All three backward kernels' mma_v2 operand parents should be
       re-verified against the Gluon runtime when GPU access is available.
+  16. 2-D load tiles constructed from two independent 1-D BlockedLayouts
+      (MOST LIKELY FIRST-RUN FAILURE): q_tile, k_tile, v_tile in the forward
+      and the corresponding loads in the backward kernels are built by indexing
+      with offs_m[:, None] (row_layout arange) and offs_d[None, :] (col_layout
+      arange) -- two INDEPENDENT 1-D BlockedLayouts. The proven matmul.py
+      instead derives both index vectors as gl.SliceLayout(axis, load_layout)
+      so they are slices of the SAME 2-D layout and broadcast cleanly into the
+      loaded tile. Whether Gluon resolves two unrelated 1-D BlockedLayouts into
+      a coherent 2-D load tile (i.e., whether the outer-product broadcasting
+      implied by offs_m[:, None] * ... + offs_d[None, :] * ... is valid across
+      independently-constructed layouts) is the most likely first-run failure.
+      This should be the FIRST thing validated on a GPU; if it fails, every
+      2-D load/store in all three kernels must be rewritten to the SliceLayout
+      idiom from matmul.py.
 """
 
 import math
@@ -159,6 +173,8 @@ def _attn_fwd_kernel(
     # CONCERN 3 (mild): the strided pointer arithmetic below mirrors the Triton
     # twin; Gluon's BlockedLayout pointer indexing is assumed to behave
     # identically for contiguous tensors.
+    # CONCERN 16: offs_m (row_layout) and offs_d (col_layout) are independent
+    # 1-D layouts; see module docstring CONCERN 16 -- most likely first-run failure.
     q_tile = gl.load(
         Q + off_b * stride_qb + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd,
         mask=offs_m[:, None] < N,
