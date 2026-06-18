@@ -6,8 +6,8 @@ and non-causal variants are timed. Compute-bound kernels are sensitive to
 contention, so the script refuses to run while any other process holds the
 benchmark GPU.
 
-The Gluon kernel is static-checked only (not GPU-run); see the module-level
-CONCERNS list in gluon_impl/attention.py for unverified gl.* patterns.
+The Gluon kernel is GPU-verified against torch SDPA / autograd; see the
+module docstring in gluon_impl/attention.py for the SliceLayout discipline.
 
 Usage: python chapters/12-attention-gluon/bench.py
 """
