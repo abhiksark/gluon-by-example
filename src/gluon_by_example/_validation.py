@@ -89,3 +89,44 @@ def check_matmul_inputs(a: torch.Tensor, b: torch.Tensor) -> None:
         raise ValueError("dimensions must be non-empty")
     if not (a.is_contiguous() and b.is_contiguous()):
         raise ValueError("inputs must be contiguous")
+
+
+# Same fused-row dtypes as softmax. fp64 included so gradcheck can run.
+_NORM_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+
+
+def check_normalization_inputs(x: torch.Tensor, weight: torch.Tensor,
+                               bias: torch.Tensor = None) -> None:
+    """Validates inputs for row-wise LayerNorm/RMSNorm kernels.
+
+    Args:
+        x: Input tensor, shape (M, N).
+        weight: Per-feature scale, shape (N,).
+        bias: Optional per-feature shift, shape (N,).
+
+    Raises:
+        ValueError: If x is not a 2-D, contiguous CUDA tensor of a supported
+            floating dtype, or if weight/bias are not 1-D CUDA tensors of
+            length N and matching dtype.
+    """
+    if not x.is_cuda:
+        raise ValueError("input must be a CUDA tensor")
+    if x.ndim != 2:
+        raise ValueError(f"input must be 2-D, got {x.ndim}-D")
+    if x.dtype not in _NORM_DTYPES:
+        supported = ", ".join(str(d).removeprefix("torch.") for d in _NORM_DTYPES)
+        raise ValueError(f"unsupported dtype {x.dtype}; supported: {supported}")
+    if not x.is_contiguous():
+        raise ValueError("input must be contiguous")
+    n_cols = x.shape[1]
+    for name, t in (("weight", weight), ("bias", bias)):
+        if t is None:
+            continue
+        if not t.is_cuda:
+            raise ValueError(f"{name} must be a CUDA tensor")
+        if t.ndim != 1 or t.shape[0] != n_cols:
+            raise ValueError(
+                f"{name} must be 1-D of length {n_cols}, got {tuple(t.shape)}"
+            )
+        if t.dtype != x.dtype:
+            raise ValueError(f"{name} dtype {t.dtype} must match input {x.dtype}")
