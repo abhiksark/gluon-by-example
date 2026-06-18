@@ -7,17 +7,24 @@ import triton
 
 from gluon_by_example.triton_impl.matmul import _CONFIGS, _matmul_kernel
 from gluon_by_example.triton_impl.matmul import matmul as triton_matmul
+from gluon_by_example.gluon_impl.matmul import matmul as gluon_matmul
+from gluon_by_example.gluon_impl.matmul_pipelined import matmul as gluon_pipe_matmul
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
-# Chapter 5 adds the Gluon implementation here.
+# Chapter 5 adds the Gluon implementations here.
 BACKENDS = {
     "triton": triton_matmul,
+    "gluon": gluon_matmul,
+    "gluon-pipe": gluon_pipe_matmul,
 }
 
 # (M, K, N): degenerate single element, one tile, odd everything (masks on
 # every edge), odd-and-larger, and a multi-tile rectangular case.
 SHAPES = [(1, 1, 1), (16, 16, 16), (33, 77, 55), (255, 257, 129), (512, 1024, 768)]
+# The gluon chapter kernel is tile-aligned fp16 only (M%128, N%128, K%64).
+# (M, K, N): one tile, two tiles square, a rectangular multi-tile case.
+ALIGNED_SHAPES = [(128, 64, 128), (256, 256, 256), (384, 128, 256)]
 
 # Compare against the fp64 product of the same inputs — the mathematically
 # true answer. cuBLAS output is itself ~1-2 output-ulps from that truth (on
@@ -32,7 +39,7 @@ TOLS = {
 
 
 @requires_cuda
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", ["triton"])
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_matches_ground_truth(backend, shape, dtype):
@@ -87,3 +94,49 @@ def test_rejects_fp32(backend):
     b = torch.randn(16, 4, device="cuda")
     with pytest.raises(ValueError, match="unsupported"):
         BACKENDS[backend](a, b)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", ALIGNED_SHAPES)
+def test_gluon_matches_ground_truth(shape):
+    m, k, n = shape
+    a = torch.randn(m, k, device="cuda", dtype=torch.float16)
+    b = torch.randn(k, n, device="cuda", dtype=torch.float16)
+    out = gluon_matmul(a, b)
+    torch.testing.assert_close(
+        out.double(), a.double() @ b.double(), **TOLS[torch.float16])
+
+
+@requires_cuda
+def test_gluon_rejects_unaligned():
+    a = torch.randn(130, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(64, 128, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="tile-aligned"):
+        gluon_matmul(a, b)
+
+
+@requires_cuda
+def test_gluon_rejects_bf16():
+    a = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="float16"):
+        gluon_matmul(a, b)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", ALIGNED_SHAPES)
+def test_gluon_pipe_matches_ground_truth(shape):
+    m, k, n = shape
+    a = torch.randn(m, k, device="cuda", dtype=torch.float16)
+    b = torch.randn(k, n, device="cuda", dtype=torch.float16)
+    out = gluon_pipe_matmul(a, b)
+    torch.testing.assert_close(
+        out.double(), a.double() @ b.double(), **TOLS[torch.float16])
+
+
+@requires_cuda
+def test_gluon_pipe_rejects_unaligned():
+    a = torch.randn(130, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(64, 128, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="tile-aligned"):
+        gluon_pipe_matmul(a, b)

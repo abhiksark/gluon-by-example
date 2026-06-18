@@ -1,6 +1,6 @@
-# Chapter 2: Fused Softmax — Why Fusion Is the Whole Game
+# Chapter 2: Fused Softmax: Why Fusion Is the Whole Game
 
-Chapter 1 showed that for elementwise ops, a custom kernel buys nothing —
+Chapter 1 showed that for elementwise ops, a custom kernel buys nothing:
 everyone saturates DRAM. Softmax is where custom kernels start paying rent,
 and the reason is **fusion**, not clever math.
 
@@ -20,7 +20,7 @@ That's roughly **8 passes** over the matrix (5MN+2M reads, 3MN+2M writes,
 for M rows × N cols). The math is trivial; the memory traffic is the cost.
 A fused kernel reads the matrix **once** and writes it **once**: ~4x less
 traffic, so ~4x faster on a bandwidth-bound GPU. No algorithmic insight
-required — just not leaving the chip between steps.
+required; just not leaving the chip between steps.
 
 ## The kernel
 
@@ -43,14 +43,14 @@ Three things worth noticing:
 
 - `other=-float("inf")` makes the padding lanes vanish in both reductions:
   `max(x, -inf) = max(x)` and `exp(-inf) = 0`.
-- `tl.max` / `tl.sum` are **reductions across the block** — the first
+- `tl.max` / `tl.sum` are **reductions across the block**: the first
   Triton feature with no elementwise analogue. The compiler picks the
   shuffle/shared-memory strategy. (Remember that sentence when we get to Gluon in chapter 3.)
 - Each program holds its whole row in registers, which caps the row width
   (we gate at 32768 columns). The official Triton tutorial's
   [persistent variant](https://github.com/triton-lang/triton/blob/main/python/tutorials/02-fused-softmax.py)
-  adds occupancy-aware scheduling on top; we keep the simple version —
-  it stays readable and, on this hardware, it already matches `torch.softmax`.
+  adds occupancy-aware scheduling on top; we keep the simple version,
+  which stays readable and, on this hardware, already matches `torch.softmax`.
 
 ## Benchmark
 
@@ -58,7 +58,7 @@ Three things worth noticing:
 
 All providers are charged the same ideal traffic (read MN + write MN), so
 the y-axis is *effective* bandwidth. On the RTX A6000, the naive line sits
-flat around 150–170 GB/s while the fused kernels reach 650+ — almost exactly
+flat around 150–170 GB/s while the fused kernels reach 650+, almost exactly
 the ~4x the traffic math predicts. `torch.softmax` is itself a fused CUDA
 kernel, which is why beating it takes more than fusion; matching it with 30
 lines of Python is the point (and at N=16384 the Triton kernel holds
@@ -71,7 +71,7 @@ pytest tests/test_softmax.py -v        # correctness
 python chapters/02-softmax/bench.py    # regenerate CSV + chart
 ```
 
-Next: [chapter 3](../03-softmax-gluon/) writes this same kernel in Gluon, where the layout — and how
-you spell the reductions — stops being the compiler's decision and becomes yours.
+Next: [chapter 3](../03-softmax-gluon/) writes this same kernel in Gluon, where the layout (and how
+you spell the reductions) stops being the compiler's decision and becomes yours.
 
 *Written against Triton 3.7.0 (pip). Gluon is experimental; APIs move.*

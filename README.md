@@ -1,7 +1,7 @@
 # Gluon by Example
 
-**Learn [Triton](https://github.com/triton-lang/triton)'s Gluon — the new
-low-level GPU kernel language — by writing the same kernels in Triton and
+**Learn [Triton](https://github.com/triton-lang/triton)'s Gluon, the new
+low-level GPU kernel language, by writing the same kernels in Triton and
 Gluon side by side, and benchmarking both.**
 
 > Not MXNet Gluon. Not GluonHQ/JavaFX. This is about
@@ -29,8 +29,8 @@ Requires: NVIDIA GPU (Ampere or newer), CUDA PyTorch, Triton ≥ 3.7.
 | [1](chapters/01-vector-add/) | vector add | Triton + Gluon | ✅ |
 | [2](chapters/02-softmax/) | fused softmax | Triton | ✅ |
 | [3](chapters/03-softmax-gluon/) | softmax | Gluon | ✅ |
-| 4 | matmul | Triton | planned |
-| 5 | matmul | Gluon (cp.async + mma_v2) | planned |
+| [4](chapters/04-matmul/) | matmul | Triton | ✅ |
+| [5](chapters/05-matmul-gluon/) | matmul | Gluon (mma_v2) | ✅ |
 | 6 | flash attention | Triton | planned |
 | 7 | flash attention | Gluon (TMA + warp specialization) | planned |
 
@@ -46,7 +46,7 @@ Verified against the official Gluon tutorial gates (Triton main, 2026-06):
 | tcgen05 / tensor memory | CC major == 10 (sm_100) | ❌ | ❌ | ❌ | ✅ |
 
 (Yes, wgmma is Hopper-*only* and tcgen05 is datacenter-Blackwell-only.
-Consumer Blackwell has neither — it has TMA. This table took actual source
+Consumer Blackwell has neither: it has TMA. This table took actual source
 reading to assemble; that's why it's here.)
 
 ## Gluon resources
