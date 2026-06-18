@@ -3,8 +3,10 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from gluon_by_example._validation import check_normalization_inputs
+from gluon_by_example.triton_impl import normalization as tn
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
@@ -26,3 +28,38 @@ def test_validation_rejects_non_2d():
     with pytest.raises(ValueError, match="2-D"):
         check_normalization_inputs(torch.randn(4, 8, 2, device="cuda"),
                                    torch.randn(8, device="cuda"))
+
+
+TRITON = {"layer_norm": tn.layer_norm, "rms_norm": tn.rms_norm}
+# (1,1) degenerate, (1823,781) padding mask, (4,1024) multi-warp, (16,64) tiny.
+SHAPES = [(1, 1), (8, 256), (1823, 781), (4, 1024), (16, 64)]
+
+
+def _rms_ref(x, w, eps):
+    if hasattr(F, "rms_norm"):
+        return F.rms_norm(x, (x.shape[-1],), w, eps)
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * w
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_layernorm_forward_matches_torch(shape, dtype):
+    m, n = shape
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    w = torch.randn(n, device="cuda", dtype=dtype)
+    b = torch.randn(n, device="cuda", dtype=dtype)
+    out = tn.layer_norm(x, w, b)
+    ref = F.layer_norm(x, (n,), w, b, eps=1e-5)
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_rmsnorm_forward_matches_torch(shape, dtype):
+    m, n = shape
+    x = torch.randn(shape, device="cuda", dtype=dtype)
+    w = torch.randn(n, device="cuda", dtype=dtype)
+    out = tn.rms_norm(x, w)
+    torch.testing.assert_close(out, _rms_ref(x, w, 1e-5), atol=1e-2, rtol=1e-2)
