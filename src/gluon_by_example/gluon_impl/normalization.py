@@ -288,16 +288,22 @@ def _dw_reduce_kernel(partial_ptr, out_ptr, group_m, n_cols,
 # Host helpers for the two-stage weight gradient
 # ---------------------------------------------------------------------------
 
-def _reduce_partials(partial, n_cols, layout):
+def _reduce_partials(partial, n_cols):
     """Sum a [group, n_cols] float32 partial buffer to [n_cols]."""
     out = torch.empty(n_cols, device=partial.device, dtype=torch.float32)
     block = 256
-    # Layout for the reduce kernel: 1-D column tile, same formula as row kernels.
     num_warps = 4
+    size_per_thread = max(min(block // (32 * num_warps), 16 // partial.element_size()), 1)
+    reduce_layout = gl.BlockedLayout(
+        size_per_thread=[size_per_thread],
+        threads_per_warp=[32],
+        warps_per_cta=[num_warps],
+        order=[0],
+    )
     grid = (triton.cdiv(n_cols, block),)
     _dw_reduce_kernel[grid](
         partial, out, partial.shape[0], n_cols,
-        BLOCK=block, layout=layout, num_warps=num_warps,
+        BLOCK=block, layout=reduce_layout, num_warps=num_warps,
     )
     return out
 
@@ -313,8 +319,8 @@ def _ln_dw_partial(dy, x, mean, rstd, dw, db, block, num_warps, layout):
         x.stride(0), n_rows, n_cols,
         GROUP_M=group, BLOCK=block, layout=layout, num_warps=num_warps,
     )
-    dw.copy_(_reduce_partials(pdw, n_cols, layout))
-    db.copy_(_reduce_partials(pdb, n_cols, layout))
+    dw.copy_(_reduce_partials(pdw, n_cols))
+    db.copy_(_reduce_partials(pdb, n_cols))
 
 
 def _rms_dw_partial(dy, x, rstd, dw, block, num_warps, layout):
@@ -327,7 +333,7 @@ def _rms_dw_partial(dy, x, rstd, dw, block, num_warps, layout):
         x.stride(0), n_rows, n_cols,
         GROUP_M=group, BLOCK=block, layout=layout, num_warps=num_warps,
     )
-    dw.copy_(_reduce_partials(pdw, n_cols, layout))
+    dw.copy_(_reduce_partials(pdw, n_cols))
 
 
 # ---------------------------------------------------------------------------
