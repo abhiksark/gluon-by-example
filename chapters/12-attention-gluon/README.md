@@ -82,7 +82,7 @@ python chapters/12-attention-gluon/bench.py
 Benchmark results are pending a GPU run. The bench sweeps sequence length N in [512, 1024, 2048,
 4096, 8192] at fixed Z=2, H=8, D=64, comparing `torch` (`F.scaled_dot_product_attention`) and
 `gluon` for both causal and non-causal variants. Metric is attention forward TFLOP/s charged at
-the full non-causal FLOPs (4ZHND^2 multiply-adds). CSV goes to
+the full non-causal FLOPs (4 * Z * H * N^2 * D multiply-adds). CSV goes to
 `benchmarks/results/attention-gluon-{slug}.csv`.
 
 To generate results and chart on your GPU:

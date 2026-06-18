@@ -70,7 +70,7 @@ def require_idle_gpu() -> None:
                      "on a shared card are fiction.")
 
 
-def _tflops(n: int, ms: float, causal: bool) -> float:
+def _tflops(n: int, ms: float) -> float:
     """Attention forward TFLOP/s.
 
     Full non-causal attention computes 4 * Z * H * N^2 * D FLOPs (two N x N
@@ -105,9 +105,9 @@ def main() -> None:
             rows.append({
                 "n": n,
                 "provider": f"torch{suffix}",
-                "tflops": round(_tflops(n, ms_torch, causal), 2),
+                "tflops": round(_tflops(n, ms_torch), 2),
             })
-            print(f"N={n:>5}  {'torch'+suffix:<16}  {_tflops(n, ms_torch, causal):8.1f} TFLOP/s")
+            print(f"N={n:>5}  {'torch'+suffix:<16}  {_tflops(n, ms_torch):8.1f} TFLOP/s")
 
             ms_gluon = triton.testing.do_bench(
                 lambda causal=causal: ga.attention(q, k, v, causal=causal)
@@ -115,9 +115,9 @@ def main() -> None:
             rows.append({
                 "n": n,
                 "provider": f"gluon{suffix}",
-                "tflops": round(_tflops(n, ms_gluon, causal), 2),
+                "tflops": round(_tflops(n, ms_gluon), 2),
             })
-            print(f"N={n:>5}  {'gluon'+suffix:<16}  {_tflops(n, ms_gluon, causal):8.1f} TFLOP/s")
+            print(f"N={n:>5}  {'gluon'+suffix:<16}  {_tflops(n, ms_gluon):8.1f} TFLOP/s")
 
     slug = gpu_slug()
     results_dir = REPO / "benchmarks" / "results"

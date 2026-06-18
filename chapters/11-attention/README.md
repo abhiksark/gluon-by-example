@@ -99,7 +99,7 @@ python chapters/11-attention/bench.py
 Benchmark results are pending a GPU run. The bench sweeps sequence length N in [512, 1024, 2048,
 4096, 8192] at fixed Z=2, H=8, D=64, comparing `torch` (`F.scaled_dot_product_attention`) and
 `triton` (the FA implementation in this chapter) for both causal and non-causal variants. Metric
-is attention forward TFLOP/s charged at the full non-causal FLOPs (4ZHND^2 multiply-adds) so
+is attention forward TFLOP/s charged at the full non-causal FLOPs (4 * Z * H * N^2 * D multiply-adds) so
 causal and non-causal are comparable; causal will read lower because it skips half the KV blocks.
 
 To generate results and chart on your GPU:
