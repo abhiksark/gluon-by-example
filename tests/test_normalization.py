@@ -63,3 +63,32 @@ def test_rmsnorm_forward_matches_torch(shape, dtype):
     w = torch.randn(n, device="cuda", dtype=dtype)
     out = tn.rms_norm(x, w)
     torch.testing.assert_close(out, _rms_ref(x, w, 1e-5), atol=1e-2, rtol=1e-2)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", [(64, 256), (1823, 781), (16, 64)])
+def test_layernorm_backward_matches_autograd(shape):
+    m, n = shape
+    x = torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
+    w = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
+    b = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
+    xr, wr, br = (t.detach().clone().requires_grad_(True) for t in (x, w, b))
+    g = torch.randn(shape, device="cuda", dtype=torch.float64)
+    tn.layer_norm(x, w, b).backward(g)
+    F.layer_norm(xr, (n,), wr, br, eps=1e-5).backward(g)
+    for a, e in ((x, xr), (w, wr), (b, br)):
+        torch.testing.assert_close(a.grad, e.grad, atol=1e-6, rtol=1e-5)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", [(64, 256), (1823, 781), (16, 64)])
+def test_rmsnorm_backward_matches_autograd(shape):
+    m, n = shape
+    x = torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
+    w = torch.randn(n, device="cuda", dtype=torch.float64, requires_grad=True)
+    xr, wr = (t.detach().clone().requires_grad_(True) for t in (x, w))
+    g = torch.randn(shape, device="cuda", dtype=torch.float64)
+    tn.rms_norm(x, w).backward(g)
+    (_rms_ref(xr, wr, 1e-5)).backward(g)
+    for a, e in ((x, xr), (w, wr)):
+        torch.testing.assert_close(a.grad, e.grad, atol=1e-6, rtol=1e-5)

@@ -14,6 +14,7 @@ import triton.language as tl
 from gluon_by_example._validation import check_normalization_inputs
 
 _MAX_COLS = 32768
+_dw_mode = "atomic"  # P4 adds "partial"
 
 
 def _launch_meta(n_cols):
@@ -70,6 +71,106 @@ def _check_cols(x):
     return n_cols
 
 
+@triton.jit
+def _layernorm_bwd_dx_kernel(dy_ptr, x_ptr, w_ptr, mean_ptr, rstd_ptr, dx_ptr,
+                             row_stride, n_cols, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.load(mean_ptr + row)
+    rstd = tl.load(rstd_ptr + row)
+    x_hat = tl.where(mask, (x - mean) * rstd, 0.0)
+    wdy = tl.where(mask, w * dy, 0.0)
+    c1 = tl.sum(x_hat * wdy, axis=0) / n_cols
+    c2 = tl.sum(wdy, axis=0) / n_cols
+    dx = (wdy - x_hat * c1 - c2) * rstd
+    tl.store(dx_ptr + row * row_stride + cols, dx, mask=mask)
+
+
+@triton.jit
+def _rmsnorm_bwd_dx_kernel(dy_ptr, x_ptr, w_ptr, rstd_ptr, dx_ptr,
+                           row_stride, n_cols, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    rstd = tl.load(rstd_ptr + row)
+    x_hat = tl.where(mask, x * rstd, 0.0)
+    wdy = tl.where(mask, w * dy, 0.0)
+    c1 = tl.sum(x_hat * wdy, axis=0) / n_cols
+    dx = (wdy - x_hat * c1) * rstd
+    tl.store(dx_ptr + row * row_stride + cols, dx, mask=mask)
+
+
+@triton.jit
+def _ln_dw_atomic_kernel(dy_ptr, x_ptr, mean_ptr, rstd_ptr, dw_ptr, db_ptr,
+                         row_stride, n_cols, BLOCK: tl.constexpr):
+    # Floor: every program atomically adds its row's contribution to the
+    # shared dw/db accumulators. Correct but contention-bound on N columns.
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.load(mean_ptr + row)
+    rstd = tl.load(rstd_ptr + row)
+    x_hat = (x - mean) * rstd
+    tl.atomic_add(dw_ptr + cols, dy * x_hat, mask=mask)
+    tl.atomic_add(db_ptr + cols, dy, mask=mask)
+
+
+@triton.jit
+def _rms_dw_atomic_kernel(dy_ptr, x_ptr, rstd_ptr, dw_ptr,
+                          row_stride, n_cols, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    dy = tl.load(dy_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    rstd = tl.load(rstd_ptr + row)
+    x_hat = x * rstd
+    tl.atomic_add(dw_ptr + cols, dy * x_hat, mask=mask)
+
+
+def _ln_dw_partial(dy, x, mean, rstd, dw, db):
+    raise NotImplementedError  # implemented in P4
+
+
+def _rms_dw_partial(dy, x, rstd, dw):
+    raise NotImplementedError  # implemented in P4
+
+
+def _ln_weight_grads(dy, x, mean, rstd, dtype):
+    n_rows, n_cols = x.shape
+    block, num_warps = _launch_meta(n_cols)
+    dw = torch.zeros(n_cols, device=x.device, dtype=torch.float32)
+    db = torch.zeros(n_cols, device=x.device, dtype=torch.float32)
+    if _dw_mode == "atomic":
+        _ln_dw_atomic_kernel[(n_rows,)](
+            dy, x, mean, rstd, dw, db, x.stride(0), n_cols,
+            BLOCK=block, num_warps=num_warps)
+    else:
+        _ln_dw_partial(dy, x, mean, rstd, dw, db)  # P4
+    return dw.to(dtype), db.to(dtype)
+
+
+def _rms_weight_grad(dy, x, rstd, dtype):
+    n_rows, n_cols = x.shape
+    block, num_warps = _launch_meta(n_cols)
+    dw = torch.zeros(n_cols, device=x.device, dtype=torch.float32)
+    if _dw_mode == "atomic":
+        _rms_dw_atomic_kernel[(n_rows,)](
+            dy, x, rstd, dw, x.stride(0), n_cols, BLOCK=block, num_warps=num_warps)
+    else:
+        _rms_dw_partial(dy, x, rstd, dw)  # P4
+    return dw.to(dtype)
+
+
 class _LayerNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, eps):
@@ -89,7 +190,16 @@ class _LayerNorm(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        raise NotImplementedError  # filled in P3
+        x, weight, mean, rstd = ctx.saved_tensors
+        n_rows, n_cols = x.shape
+        block, num_warps = _launch_meta(n_cols)
+        dy = dy.contiguous()
+        dx = torch.empty_like(x)
+        _layernorm_bwd_dx_kernel[(n_rows,)](
+            dy, x, weight, mean, rstd, dx, x.stride(0), n_cols,
+            BLOCK=block, num_warps=num_warps)
+        dw, db = _ln_weight_grads(dy, x, mean, rstd, weight.dtype)
+        return dx, dw, db, None
 
 
 class _RMSNorm(torch.autograd.Function):
@@ -110,7 +220,16 @@ class _RMSNorm(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        raise NotImplementedError  # filled in P3
+        x, weight, rstd = ctx.saved_tensors
+        n_rows, n_cols = x.shape
+        block, num_warps = _launch_meta(n_cols)
+        dy = dy.contiguous()
+        dx = torch.empty_like(x)
+        _rmsnorm_bwd_dx_kernel[(n_rows,)](
+            dy, x, weight, rstd, dx, x.stride(0), n_cols,
+            BLOCK=block, num_warps=num_warps)
+        dw = _rms_weight_grad(dy, x, rstd, weight.dtype)
+        return dx, dw, None
 
 
 def layer_norm(x, weight, bias, eps=1e-5):
