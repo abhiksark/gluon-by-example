@@ -10,110 +10,31 @@ uses the FA2 split: preprocess (Delta = rowsum(dO . O)), then dk/dv kernel
 Inputs are 4-D (Z, H, N, D); the wrapper views them as (Z*H, N, D), exactly
 matching the Triton twin in triton_impl/attention.py.
 
-STATUS: static-checked only, not GPU-run. See module-level CONCERNS list
-for gl.* calls that cannot be confirmed without a live Gluon runtime.
+STATUS: GPU-verified on an RTX A6000 (sm_86). Forward and backward, causal
+and non-causal, match torch SDPA / autograd within fp16 tolerance.
 
-CONCERNS (flagged, not silently guessed):
-  Forward concerns (from P4):
-  1. gl.DotOperandLayout / gl.NVMMADistributedLayout for the QK^T output fed
-     into P V: after mma_v2 produces QK (acc_layout = NVMMADistributedLayout),
-     converting it to lhs_layout (DotOperandLayout operand_index=0) for the
-     second mma_v2 call may require a different k_width because QK has shape
-     (BLOCK_M, BLOCK_N) while the second matmul contracts over BLOCK_N. The
-     k_width=BLOCK_N//8 guess below follows the pattern in matmul.py (k_width=8
-     for BLOCK_K=64) but BLOCK_N=64 -> k_width=8 only by coincidence; a GPU run
-     must confirm.
-  2. acc * alpha[:, None] inside the kernel loop: Gluon's distributed MMA layout
-     (NVMMADistributedLayout) may not support in-place broadcast-multiply with a
-     [BLOCK_M] vector. The workaround proposed is gl.convert_layout(alpha, ...)
-     followed by elementwise multiply, but the exact layout argument is not
-     confirmed.
-  3. gl.store of a scalar per-row logsumexp L to a 1-D slice: the pattern
-     gl.store(L + off_b * N + offs_m, lse, mask=offs_m < N) matches the Triton
-     twin textually but its behaviour under the blocked layout for a rank-1
-     pointer arithmetic in Gluon is unverified.
-  4. p.to(v.dtype) inside the kernel before the PV mma_v2: the in-kernel cast
-     of the NVMMADistributed fp32 tile to fp16 before the second mma_v2 is
-     idiomatic from the Triton twin but Gluon's .to() on distributed layouts may
-     carry caveats not visible from static inspection.
-  5. gl.where masking with a row_layout-derived condition applied to acc_layout
-     operands: the padding mask (offs_n[None, :] < N) and causal mask
-     (offs_m[:, None] >= offs_n[None, :]) are built from row_layout arange
-     vectors, but the true/false branches are acc_layout (NVMMADistributedLayout)
-     tensors. Whether gl.where accepts a condition whose layout differs from
-     the operand layout, and how it broadcasts the 1-D row_layout index across
-     the 2-D acc_layout tile, is unverified without a live Gluon runtime.
-
-  Backward concerns (P5, higher risk):
-  6. Transposed-operand mma_v2 in _attn_bwd_dkdv_kernel: the matmul S^T =
-     K @ Q^T (BLOCK_N x BLOCK_M) is computed by loading Q with swapped strides
-     (offs_d[:, None] * stride + offs_m[None, :] * stride_n) so it arrives as
-     (D, BLOCK_M) rather than using a tl.trans equivalent. Whether Gluon's
-     mma_v2 + DotOperandLayout pair accepts this transposed-stride pointer
-     pattern in its rhs operand (operand_index=1) is unverified at static
-     inspection time.
-  7. Transposed-operand mma_v2 for dP^T = V @ dO^T (BLOCK_N x BLOCK_M):
-     same transposed-stride pattern for dO in the rhs slot. Unverified.
-  8. acc_layout_nt (NVMMADistributedLayout) for (BLOCK_N, BLOCK_M) tiles:
-     the backward dk/dv kernels accumulate S^T, dP^T in (BLOCK_N, BLOCK_M)
-     shape. Using an acc_layout with warps_per_cta=[_NUM_WARPS, 1] matches
-     the forward convention, but the MMA tile is 16x8 and the outer dimensions
-     are BLOCK_N x BLOCK_M (both 64). Whether the same NVMMADistributedLayout
-     is valid for an (M=BLOCK_N, N=BLOCK_M) tile (i.e., whether
-     warps_per_cta=[_NUM_WARPS, 1] is legal when the first dim is BLOCK_N=64
-     rather than BLOCK_M=64) is unverified. It may need warps_per_cta=[1,
-     _NUM_WARPS] or a different instr_shape.
-  9. Per-block gl.store of dk/dv accumulator: the backward dkdv kernel
-     accumulates dk, dv across all Q-blocks and stores them once per KV-block.
-     The gl.store with out-of-bounds mask (offs_n[:, None] < N) on a
-     (BLOCK_N, D) tile in acc_layout is assumed to behave like the Triton twin,
-     but is unverified without a GPU run.
-  10. Scalar gl.load of L and Delta per Q-block row: the pattern
-      gl.load(L + off_b * N + offs_m, mask=offs_m < N, other=0.0) loads a
-      BLOCK_M-length row_layout vector from a flat 1-D buffer. Whether Gluon's
-      row_layout matches the Triton 1-D blocked load semantics is unverified.
-  11. Delta broadcast delta[None, :] in dkdv / delta[:, None] in dq: the
-      element-wise multiply pT * (dpT - delta[None, :]) mixes a (BLOCK_N,
-      BLOCK_M) acc_layout_nt tile with a row_layout-derived broadcast. Whether
-      Gluon propagates the broadcast correctly across a NVMMADistributedLayout
-      tile is unverified (same class of risk as CONCERN 5 in the forward).
-  12. Dynamic loop bound in dkdv: `lo = start_n * BLOCK_N if CAUSAL else 0`.
-      The loop `for start_m in range(lo, N, BLOCK_M)` uses a runtime-computed
-      start. Gluon's JIT range() handling for non-zero starts is assumed to
-      mirror Triton's but is unverified for constexpr-only vs. dynamic starts.
-  13. gl.store of dq accumulator inside dq kernel: after the inner KV-block
-      loop, dq is stored to the DQ buffer in one shot per Q-block. Same class
-      of risk as CONCERN 9 for the dkdv kernel.
-  14. .to(gl.float16) cast before mma_v2 in backward: pT, p, dsT, ds are fp32
-      NVMMADistributedLayout tiles cast to fp16 before feeding mma_v2. The
-      backward matmuls (dsT @ Q, ds @ K) expect fp16 operands and fp32
-      accumulation. Whether Gluon's .to(gl.float16) on an acc_layout_nt tile
-      correctly re-materialises a DotOperandLayout-compatible representation
-      before convert_layout is applied is unverified.
-  15. Operand-layout parent matching across all backward mma_v2 calls (review
-      I1, GPU-UNVERIFIED): every gl.convert_layout(operand, *_layout) call must
-      use a DotOperandLayout whose parent is the accumulator of THAT mma_v2
-      call. The dV and dK mma_v2s in _attn_bwd_dkdv_kernel (accumulate into
-      acc_layout_nd) were previously using lhs_layout_nt (parent=acc_layout_nt);
-      this has been corrected to lhs_layout_nd. The fix is statically consistent
-      but the parent-matching contract for DotOperandLayout is the area of the
-      Gluon experimental API most likely to require rework on the first live GPU
-      run. All three backward kernels' mma_v2 operand parents should be
-      re-verified against the Gluon runtime when GPU access is available.
-  16. 2-D load tiles constructed from two independent 1-D BlockedLayouts
-      (MOST LIKELY FIRST-RUN FAILURE): q_tile, k_tile, v_tile in the forward
-      and the corresponding loads in the backward kernels are built by indexing
-      with offs_m[:, None] (row_layout arange) and offs_d[None, :] (col_layout
-      arange) -- two INDEPENDENT 1-D BlockedLayouts. The proven matmul.py
-      instead derives both index vectors as gl.SliceLayout(axis, load_layout)
-      so they are slices of the SAME 2-D layout and broadcast cleanly into the
-      loaded tile. Whether Gluon resolves two unrelated 1-D BlockedLayouts into
-      a coherent 2-D load tile (i.e., whether the outer-product broadcasting
-      implied by offs_m[:, None] * ... + offs_d[None, :] * ... is valid across
-      independently-constructed layouts) is the most likely first-run failure.
-      This should be the FIRST thing validated on a GPU; if it fails, every
-      2-D load/store in all three kernels must be rewritten to the SliceLayout
-      idiom from matmul.py.
+The one layout rule that makes a Gluon FlashAttention express at all: every
+index vector must be a gl.SliceLayout slice of the SAME 2-D parent it
+indexes, never an independent 1-D BlockedLayout. For a (rows, cols) tile in
+`parent`, the row index (used [:, None], axis 0) is SliceLayout(1, parent)
+and the column index (used [None, :], axis 1) is SliceLayout(0, parent).
+Two consequences worth internalising:
+  - Loads/stores index load_layout (a BlockedLayout); the mma outputs, the
+    masks, and the gl.where branches index acc_layout (NVMMADistributedLayout).
+    The same logical offset (e.g. offs_m) therefore appears in several
+    SliceLayout flavours -- one per parent-and-axis it is used against.
+  - Per-row statistics inherit their layout from how they are produced or
+    consumed. Reductions over axis 1 of an acc tile land in
+    SliceLayout(1, acc_layout) and expand back via [:, None]; values that
+    broadcast over the BLOCK_M axis of a transposed (BLOCK_N, BLOCK_M) tile
+    live in SliceLayout(0, acc_layout_nt) and expand via [None, :].
+Get those slices right and everything else follows: the transposed-operand
+mma_v2 (S^T = K @ Q^T loaded with swapped strides), the (BLOCK_N, BLOCK_M)
+acc_layout_nt tiles, the in-kernel fp16 casts, the scalar L/Delta loads, the
+operand-parent matching (each convert_layout's DotOperandLayout is parented
+to the accumulator of THAT mma_v2), and the dynamic causal loop start all
+lower and compute correctly. The codegen ceiling from ch10 still applies:
+this is the honest-best Gluon expression, not a speed record.
 """
 
 import math
@@ -146,9 +67,7 @@ def _attn_fwd_kernel(
         acc_layout: gl.constexpr,
         lhs_layout: gl.constexpr,
         rhs_layout: gl.constexpr,
-        load_layout: gl.constexpr,
-        row_layout: gl.constexpr,
-        col_layout: gl.constexpr):
+        load_layout: gl.constexpr):
     """Forward FA kernel: online-softmax tiling over KV blocks.
 
     One program (start_m, off_b) owns BLOCK_M query rows for one batch-head
@@ -156,44 +75,51 @@ def _attn_fwd_kernel(
     sum l_i, and accumulator acc in fp32. Two mma_v2 calls handle QK^T and
     PV respectively.
 
-    Layout names follow matmul.py: acc_layout = NVMMADistributedLayout for
-    fp32 accumulation; lhs/rhs = DotOperandLayout for operands; load_layout =
-    BlockedLayout for input loads; row_layout = 1-D BlockedLayout for the
-    per-row running statistics (m_i, l_i, alpha, lse).
+    Layout discipline follows matmul.py: every index vector is a
+    gl.SliceLayout slice of the SAME 2-D parent it indexes, never an
+    independent 1-D BlockedLayout (the CONCERN 16 fix). Load/store tiles use
+    load_layout; the mma output and reductions use acc_layout, so per-row
+    statistics (m_i, l_i, alpha, lse) live in SliceLayout(1, acc_layout)
+    because they are reductions over axis 1 of an acc_layout tile.
     """
     start_m = gl.program_id(0)
     off_b = gl.program_id(1)
 
-    # Row indices for this program's BLOCK_M tile.
-    offs_m = start_m * BLOCK_M + gl.arange(0, BLOCK_M, layout=row_layout)
-    # Head-dim indices.
-    offs_d = gl.arange(0, D, layout=col_layout)
+    # Index vectors as slices of their 2-D parents (matmul.py idiom).
+    # For a (rows, cols) tile in `parent`: the row index (used [:, None],
+    # axis 0) is SliceLayout(1, parent); the col index (used [None, :],
+    # axis 1) is SliceLayout(0, parent).
+    # Load-tile (load_layout) indices:
+    offs_m_ld = start_m * BLOCK_M + gl.arange(0, BLOCK_M, gl.SliceLayout(1, load_layout))
+    offs_d_c = gl.arange(0, D, gl.SliceLayout(0, load_layout))    # head-dim as a column
+    offs_d_r = gl.arange(0, D, gl.SliceLayout(1, load_layout))    # head-dim as a row (K^T load)
+    # Acc-tile (acc_layout) indices and the per-row stats layout.
+    offs_m_ac = start_m * BLOCK_M + gl.arange(0, BLOCK_M, gl.SliceLayout(1, acc_layout))
 
     # Load Q tile: (BLOCK_M, D) -- loaded once, reused for all KV blocks.
-    # CONCERN 3 (mild): the strided pointer arithmetic below mirrors the Triton
-    # twin; Gluon's BlockedLayout pointer indexing is assumed to behave
-    # identically for contiguous tensors.
-    # CONCERN 16: offs_m (row_layout) and offs_d (col_layout) are independent
-    # 1-D layouts; see module docstring CONCERN 16 -- most likely first-run failure.
     q_tile = gl.load(
-        Q + off_b * stride_qb + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd,
-        mask=offs_m[:, None] < N,
+        Q + off_b * stride_qb + offs_m_ld[:, None] * stride_qm + offs_d_c[None, :] * stride_qd,
+        mask=offs_m_ld[:, None] < N,
         other=0.0,
     )
 
-    # Running statistics (all fp32).
-    m_i = gl.full([BLOCK_M], -float("inf"), gl.float32, row_layout)
-    l_i = gl.full([BLOCK_M], 0.0, gl.float32, row_layout)
+    # Running statistics (all fp32, in SliceLayout(1, acc_layout)).
+    m_i = gl.full([BLOCK_M], -float("inf"), gl.float32, gl.SliceLayout(1, acc_layout))
+    l_i = gl.full([BLOCK_M], 0.0, gl.float32, gl.SliceLayout(1, acc_layout))
     acc = gl.full([BLOCK_M, D], 0.0, gl.float32, acc_layout)
 
     hi = (start_m + 1) * BLOCK_M if CAUSAL else N
     for start_n in range(0, hi, BLOCK_N):
-        offs_n = start_n + gl.arange(0, BLOCK_N, layout=row_layout)
+        # KV-block indices: as a load-tile row (V), as a load-tile col (K^T),
+        # and as an acc-tile col (masks).
+        offs_n_ld = start_n + gl.arange(0, BLOCK_N, gl.SliceLayout(1, load_layout))
+        offs_n_c = start_n + gl.arange(0, BLOCK_N, gl.SliceLayout(0, load_layout))
+        offs_n_ac = start_n + gl.arange(0, BLOCK_N, gl.SliceLayout(0, acc_layout))
 
         # Load K tile transposed: (D, BLOCK_N).
         k_tile = gl.load(
-            K + off_b * stride_kb + offs_d[:, None] * stride_kd + offs_n[None, :] * stride_kn,
-            mask=offs_n[None, :] < N,
+            K + off_b * stride_kb + offs_d_r[:, None] * stride_kd + offs_n_c[None, :] * stride_kn,
+            mask=offs_n_c[None, :] < N,
             other=0.0,
         )
 
@@ -206,19 +132,14 @@ def _attn_fwd_kernel(
         )
         # Scale and apply padding mask (out-of-bounds columns become -inf).
         qk = qk * sm_scale
-        # CONCERN 5: gl.where mixes a condition derived from row_layout arange
-        # vectors (offs_n[None, :] < N) with acc_layout (NVMMADistributedLayout)
-        # operands.  Whether Gluon accepts a cross-layout condition and how it
-        # broadcasts the 1-D row_layout index across the 2-D acc_layout tile is
-        # unverified without a GPU run.
         qk_masked = gl.where(
-            offs_n[None, :] < N,
+            offs_n_ac[None, :] < N,
             qk,
             gl.full([BLOCK_M, BLOCK_N], -float("inf"), gl.float32, acc_layout),
         )
         if CAUSAL:
             qk_masked = gl.where(
-                offs_m[:, None] >= offs_n[None, :],
+                offs_m_ac[:, None] >= offs_n_ac[None, :],
                 qk_masked,
                 gl.full([BLOCK_M, BLOCK_N], -float("inf"), gl.float32, acc_layout),
             )
@@ -229,27 +150,17 @@ def _attn_fwd_kernel(
         alpha = gl.exp(m_i - m_ij)
 
         # Rescale running sum and accumulator.
-        # CONCERN 2: acc * alpha[:, None] -- broadcast-multiply of a
-        # NVMMADistributedLayout tensor by a row_layout vector. Not confirmed;
-        # the [:, None] broadcasting pattern mirrors Triton tl.float32 tiles.
         l_i = l_i * alpha + gl.reduce(p, axis=1, combine_fn=_add_fn)
         acc = acc * alpha[:, None]
 
         # Load V tile: (BLOCK_N, D).
         v_tile = gl.load(
-            V + off_b * stride_vb + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd,
-            mask=offs_n[:, None] < N,
+            V + off_b * stride_vb + offs_n_ld[:, None] * stride_vn + offs_d_c[None, :] * stride_vd,
+            mask=offs_n_ld[:, None] < N,
             other=0.0,
         )
 
         # PV: acc += p @ V, accumulated in fp32.
-        # CONCERN 1: converting the QK output (acc_layout, BLOCK_M x BLOCK_N)
-        # to lhs_layout2 (DotOperandLayout, operand_index=0) for the second
-        # mma_v2. k_width here is BLOCK_N // 8 = 8 (for BLOCK_N=64), same
-        # as in matmul.py. However, the actual k_width contract for the PV
-        # matmul dimension (BLOCK_N) is unverified without a GPU run.
-        # CONCERN 4: p.to(gl.float16) cast on a NVMMADistributedLayout tensor
-        # before feeding into the second mma_v2.
         acc = mma_v2(
             gl.convert_layout(p.to(gl.float16), lhs_layout),
             gl.convert_layout(v_tile, rhs_layout),
@@ -263,18 +174,16 @@ def _attn_fwd_kernel(
     lse = m_i + gl.log(l_i)
 
     # Store output O: (BLOCK_M, D).
-    # CONCERN 3: store under acc_layout with convert to output dtype.
     out = gl.convert_layout(acc.to(gl.float16), load_layout)
     gl.store(
-        O + off_b * stride_ob + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od,
+        O + off_b * stride_ob + offs_m_ld[:, None] * stride_om + offs_d_c[None, :] * stride_od,
         out,
-        mask=offs_m[:, None] < N,
+        mask=offs_m_ld[:, None] < N,
     )
 
-    # Store per-row logsumexp L: shape (b, N), row-major.
-    # CONCERN 3: scalar gl.store to 1-D pointer with row_layout -- assumes
-    # Gluon handles this as a 1-D blocked store, matching Triton's tl.store.
-    gl.store(L + off_b * N + offs_m, lse, mask=offs_m < N)
+    # Store per-row logsumexp L: shape (b, N), row-major. lse and offs_m_ac
+    # share SliceLayout(1, acc_layout), so the 1-D store is layout-consistent.
+    gl.store(L + off_b * N + offs_m_ac, lse, mask=offs_m_ac < N)
 
 
 # ---------------------------------------------------------------------------
@@ -301,25 +210,22 @@ def _attn_bwd_preprocess_kernel(
         stride_ob, stride_om, stride_od,
         N,
         BLOCK_M: gl.constexpr, D: gl.constexpr,
-        load_layout: gl.constexpr,
-        row_layout: gl.constexpr,
-        col_layout: gl.constexpr):
+        load_layout: gl.constexpr):
     """Preprocess kernel: Delta[b, m] = rowsum(dO[b, m, :] * O[b, m, :]).
 
     One program owns BLOCK_M rows for one batch-head off_b. Mirrors
-    _attn_bwd_preprocess in the Triton twin exactly.
+    _attn_bwd_preprocess in the Triton twin exactly. No mma here, so the row
+    sum reduces over axis 1 of a load_layout tile: delta therefore lives in
+    SliceLayout(1, load_layout), and the 1-D Delta store shares that layout.
     """
     start_m = gl.program_id(0)
     off_b = gl.program_id(1)
-    offs_m = start_m * BLOCK_M + gl.arange(0, BLOCK_M, layout=row_layout)
-    offs_d = gl.arange(0, D, layout=col_layout)
+    offs_m = start_m * BLOCK_M + gl.arange(0, BLOCK_M, gl.SliceLayout(1, load_layout))
+    offs_d = gl.arange(0, D, gl.SliceLayout(0, load_layout))
     p = off_b * stride_ob + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od
-    # CONCERN 3 (mild): same pattern as forward; pointer arithmetic on
-    # row_layout x col_layout aranges is assumed to produce a load_layout tile.
     o_tile = gl.load(O + p, mask=offs_m[:, None] < N, other=0.0).to(gl.float32)
     do_tile = gl.load(DO + p, mask=offs_m[:, None] < N, other=0.0).to(gl.float32)
     delta = gl.reduce(o_tile * do_tile, axis=1, combine_fn=_add_fn)
-    # CONCERN 3: scalar 1-D gl.store to row_layout slice; mirrors Triton twin.
     gl.store(Delta + off_b * N + offs_m, delta, mask=offs_m < N)
 
 
@@ -335,9 +241,7 @@ def _attn_bwd_dkdv_kernel(
         rhs_layout_nd: gl.constexpr,
         lhs_layout_nt: gl.constexpr,
         rhs_layout_nt: gl.constexpr,
-        load_layout: gl.constexpr,
-        row_layout: gl.constexpr,
-        col_layout: gl.constexpr):
+        load_layout: gl.constexpr):
     """dk/dv backward kernel: loop over Q-blocks for one KV-block.
 
     Mirrors _attn_bwd_dkdv in the Triton twin exactly:
@@ -348,24 +252,32 @@ def _attn_bwd_dkdv_kernel(
       dS^T = P^T * (dP^T - Delta[offs_m]) * sm_scale
       dK  += dS^T @ Q          (BLOCK_N, D)
 
-    CONCERN 8: acc_layout_nt is NVMMADistributedLayout for the (BLOCK_N, BLOCK_M)
-    tiles (S^T, dP^T). Using warps_per_cta=[_NUM_WARPS, 1] for a BLOCK_N x BLOCK_M
-    tile mirrors the forward but is unverified when the tile is not BLOCK_M x D.
+    The (BLOCK_N, BLOCK_M) score-transpose tiles use acc_layout_nt; the
+    (BLOCK_N, D) gradient accumulators use acc_layout_nd. Every index vector
+    is a SliceLayout slice of the parent it indexes (load_layout for memory
+    tiles, acc_layout_nt for the score tiles). Per-row L/Delta broadcast over
+    the BLOCK_M axis of an acc_nt tile, so they live in
+    SliceLayout(0, acc_layout_nt) -- expanded via [None, :].
     """
     start_n = gl.program_id(0)
     off_b = gl.program_id(1)
-    offs_n = start_n * BLOCK_N + gl.arange(0, BLOCK_N, layout=row_layout)
-    offs_d = gl.arange(0, D, layout=col_layout)
-    kv_mask = offs_n[:, None] < N
+
+    # KV (BLOCK_N) indices: as a load-tile row, and as an acc_nt row.
+    offs_n_ld = start_n * BLOCK_N + gl.arange(0, BLOCK_N, gl.SliceLayout(1, load_layout))
+    offs_n_nt = start_n * BLOCK_N + gl.arange(0, BLOCK_N, gl.SliceLayout(1, acc_layout_nt))
+    # Head-dim indices: as a load-tile column, and as a transposed-load row.
+    offs_d_c = gl.arange(0, D, gl.SliceLayout(0, load_layout))
+    offs_d_r = gl.arange(0, D, gl.SliceLayout(1, load_layout))
+    kv_mask = offs_n_ld[:, None] < N
 
     # Load K, V tiles: both (BLOCK_N, D).
     k_tile = gl.load(
-        K + off_b * stride_b + offs_n[:, None] * stride_n + offs_d[None, :] * stride_d,
+        K + off_b * stride_b + offs_n_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
         mask=kv_mask,
         other=0.0,
     )
     v_tile = gl.load(
-        V + off_b * stride_b + offs_n[:, None] * stride_n + offs_d[None, :] * stride_d,
+        V + off_b * stride_b + offs_n_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
         mask=kv_mask,
         other=0.0,
     )
@@ -375,39 +287,33 @@ def _attn_bwd_dkdv_kernel(
     dv = gl.full([BLOCK_N, D], 0.0, gl.float32, acc_layout_nd)
 
     lo = start_n * BLOCK_N if CAUSAL else 0
-    # CONCERN 12: dynamic range start `lo` depends on runtime start_n when
-    # CAUSAL=True. Gluon JIT range() is assumed to handle non-zero starts like
-    # Triton, but this is unverified.
     for start_m in range(lo, N, BLOCK_M):
-        offs_m = start_m + gl.arange(0, BLOCK_M, layout=row_layout)
-        m_mask = offs_m < N
+        # Q (BLOCK_M) indices: as a load-tile row, as a transposed-load column,
+        # and as an acc_nt column (the broadcast axis for L/Delta and masks).
+        offs_m_ld = start_m + gl.arange(0, BLOCK_M, gl.SliceLayout(1, load_layout))
+        offs_m_c = start_m + gl.arange(0, BLOCK_M, gl.SliceLayout(0, load_layout))
+        offs_m_nt = start_m + gl.arange(0, BLOCK_M, gl.SliceLayout(0, acc_layout_nt))
 
         # Load Q tile: (BLOCK_M, D).
-        # NOTE (bandwidth opt, GPU rework): Q is loaded twice per iteration --
-        # once here as q_tile (row-major) and once below as qt_tile (transposed
-        # strides). A single load + in-register transpose would halve Q bandwidth.
+        # NOTE (bandwidth opt): Q is loaded twice per iteration -- once here as
+        # q_tile (row-major) and once below as qt_tile (transposed strides). A
+        # single load + in-register transpose would halve Q bandwidth.
         q_tile = gl.load(
-            Q + off_b * stride_b + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d,
-            mask=m_mask[:, None],
+            Q + off_b * stride_b + offs_m_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
+            mask=offs_m_ld[:, None] < N,
             other=0.0,
         )
         # Load dO tile: (BLOCK_M, D).
         do_tile = gl.load(
-            DO + off_b * stride_b + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d,
-            mask=m_mask[:, None],
+            DO + off_b * stride_b + offs_m_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
+            mask=offs_m_ld[:, None] < N,
             other=0.0,
         )
 
-        # S^T = K @ Q^T: (BLOCK_N, BLOCK_M).
-        # CONCERN 6: Q^T is loaded with transposed strides (offs_d[:, None],
-        # offs_m[None, :]) so the rhs arrives as (D, BLOCK_M) at the mma_v2
-        # rhs slot. This implements tl.trans(q) without a dedicated transpose
-        # primitive. Whether Gluon's rhs DotOperandLayout (operand_index=1)
-        # accepts a (D, BLOCK_M) shaped input for a (BLOCK_N, BLOCK_M) output
-        # tile is unverified.
+        # S^T = K @ Q^T: (BLOCK_N, BLOCK_M). Q^T loaded transposed as (D, BLOCK_M).
         qt_tile = gl.load(
-            Q + off_b * stride_b + offs_d[:, None] * stride_d + offs_m[None, :] * stride_n,
-            mask=m_mask[None, :],
+            Q + off_b * stride_b + offs_d_r[:, None] * stride_d + offs_m_c[None, :] * stride_n,
+            mask=offs_m_c[None, :] < N,
             other=0.0,
         )
         qkt = mma_v2(
@@ -418,40 +324,32 @@ def _attn_bwd_dkdv_kernel(
         qkt = qkt * sm_scale  # S^T scaled
 
         # Load L[offs_m] (per-row logsumexp from forward).
-        # CONCERN 10: scalar 1-D gl.load from row_layout slice.
-        l_i = gl.load(L + off_b * N + offs_m, mask=m_mask, other=0.0)
+        l_i = gl.load(L + off_b * N + offs_m_nt, mask=offs_m_nt < N, other=0.0)
 
         # P^T = exp(S^T - L[offs_m]): broadcast L across BLOCK_N rows.
-        # CONCERN 11: pT * (dpT - delta[None, :]) mixes acc_layout_nt tile with
-        # a row_layout-derived broadcast. Same cross-layout risk as CONCERN 5.
         pT = gl.exp(qkt - l_i[None, :])
 
         # Causal and padding mask.
-        valid = (offs_n[:, None] < N) & (m_mask[None, :])
+        valid = (offs_n_nt[:, None] < N) & (offs_m_nt[None, :] < N)
         if CAUSAL:
-            valid = valid & (offs_m[None, :] >= offs_n[:, None])
+            valid = valid & (offs_m_nt[None, :] >= offs_n_nt[:, None])
         pT = gl.where(
             valid,
             pT,
             gl.full([BLOCK_N, BLOCK_M], 0.0, gl.float32, acc_layout_nt),
         )
 
-        # dV += P^T @ dO: (BLOCK_N, D).
-        # CONCERN 14: pT.to(gl.float16) on an acc_layout_nt tile before mma_v2.
-        # Operand layouts must be parented to the accumulator of THIS mma_v2 call
-        # (dv, which is acc_layout_nd), not to acc_layout_nt.
+        # dV += P^T @ dO: (BLOCK_N, D). Operands parented to dv's acc_layout_nd.
         dv = mma_v2(
             gl.convert_layout(pT.to(gl.float16), lhs_layout_nd),
             gl.convert_layout(do_tile, rhs_layout_nd),
             dv,
         )
 
-        # dP^T = V @ dO^T: (BLOCK_N, BLOCK_M).
-        # CONCERN 7: dO^T loaded with transposed strides (offs_d[:, None],
-        # offs_m[None, :]) so rhs is (D, BLOCK_M). Same risk as CONCERN 6.
+        # dP^T = V @ dO^T: (BLOCK_N, BLOCK_M). dO^T loaded transposed as (D, BLOCK_M).
         dot_tile = gl.load(
-            DO + off_b * stride_b + offs_d[:, None] * stride_d + offs_m[None, :] * stride_n,
-            mask=m_mask[None, :],
+            DO + off_b * stride_b + offs_d_r[:, None] * stride_d + offs_m_c[None, :] * stride_n,
+            mask=offs_m_c[None, :] < N,
             other=0.0,
         )
         dpT = mma_v2(
@@ -461,17 +359,12 @@ def _attn_bwd_dkdv_kernel(
         )
 
         # Load Delta[offs_m].
-        # CONCERN 10: scalar 1-D gl.load from row_layout slice.
-        delta = gl.load(Delta + off_b * N + offs_m, mask=m_mask, other=0.0)
+        delta = gl.load(Delta + off_b * N + offs_m_nt, mask=offs_m_nt < N, other=0.0)
 
         # dS^T = P^T * (dP^T - Delta[offs_m]) * sm_scale.
-        # CONCERN 11: delta[None, :] broadcast across acc_layout_nt tile.
         dsT = pT * (dpT - delta[None, :]) * sm_scale
 
-        # dK += dS^T @ Q: (BLOCK_N, D).
-        # CONCERN 14: dsT.to(gl.float16) on acc_layout_nt before mma_v2.
-        # Operand layouts must be parented to the accumulator of THIS mma_v2 call
-        # (dk, which is acc_layout_nd), not to acc_layout_nt.
+        # dK += dS^T @ Q: (BLOCK_N, D). Operands parented to dk's acc_layout_nd.
         dk = mma_v2(
             gl.convert_layout(dsT.to(gl.float16), lhs_layout_nd),
             gl.convert_layout(q_tile, rhs_layout_nd),
@@ -479,16 +372,15 @@ def _attn_bwd_dkdv_kernel(
         )
 
     # Store dk, dv: (BLOCK_N, D).
-    # CONCERN 9: gl.store of (BLOCK_N, D) acc_layout_nd tile with kv_mask.
     dk_out = gl.convert_layout(dk.to(gl.float16), load_layout)
     dv_out = gl.convert_layout(dv.to(gl.float16), load_layout)
     gl.store(
-        DK + off_b * stride_b + offs_n[:, None] * stride_n + offs_d[None, :] * stride_d,
+        DK + off_b * stride_b + offs_n_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
         dk_out,
         mask=kv_mask,
     )
     gl.store(
-        DV + off_b * stride_b + offs_n[:, None] * stride_n + offs_d[None, :] * stride_d,
+        DV + off_b * stride_b + offs_n_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
         dv_out,
         mask=kv_mask,
     )
@@ -503,9 +395,7 @@ def _attn_bwd_dq_kernel(
         acc_layout: gl.constexpr,
         lhs_layout: gl.constexpr,
         rhs_layout: gl.constexpr,
-        load_layout: gl.constexpr,
-        row_layout: gl.constexpr,
-        col_layout: gl.constexpr):
+        load_layout: gl.constexpr):
     """dq backward kernel: loop over KV-blocks for one Q-block.
 
     Mirrors _attn_bwd_dq in the Triton twin exactly:
@@ -515,54 +405,58 @@ def _attn_bwd_dq_kernel(
       dS   = P * (dP - Delta[offs_m]) * sm_scale
       dQ  += dS @ K   (BLOCK_M, D)
 
-    CONCERN 8 (dq): acc_layout is the same NVMMADistributedLayout as the
-    forward (BLOCK_M, BLOCK_N) and (BLOCK_M, D) tiles, so no new shape
-    question, but the transposed rhs slots for K^T and V^T (CONCERNS 6, 7
-    class) apply here too.
+    Same SliceLayout discipline as the forward: the (BLOCK_M, BLOCK_N) and
+    (BLOCK_M, D) tiles use acc_layout; per-row L/Delta broadcast over the
+    BLOCK_N axis, so they live in SliceLayout(1, acc_layout) -- expanded via
+    [:, None]. K^T and V^T are loaded with transposed strides as (D, BLOCK_N).
     """
     start_m = gl.program_id(0)
     off_b = gl.program_id(1)
-    offs_m = start_m * BLOCK_M + gl.arange(0, BLOCK_M, layout=row_layout)
-    offs_d = gl.arange(0, D, layout=col_layout)
-    m_mask = offs_m < N
+
+    # Q (BLOCK_M) indices: as a load-tile row, and as an acc row.
+    offs_m_ld = start_m * BLOCK_M + gl.arange(0, BLOCK_M, gl.SliceLayout(1, load_layout))
+    offs_m_ac = start_m * BLOCK_M + gl.arange(0, BLOCK_M, gl.SliceLayout(1, acc_layout))
+    # Head-dim indices: as a load-tile column, and as a transposed-load row.
+    offs_d_c = gl.arange(0, D, gl.SliceLayout(0, load_layout))
+    offs_d_r = gl.arange(0, D, gl.SliceLayout(1, load_layout))
 
     # Load Q, dO tiles: (BLOCK_M, D).
     q_tile = gl.load(
-        Q + off_b * stride_b + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d,
-        mask=m_mask[:, None],
+        Q + off_b * stride_b + offs_m_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
+        mask=offs_m_ld[:, None] < N,
         other=0.0,
     )
     do_tile = gl.load(
-        DO + off_b * stride_b + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d,
-        mask=m_mask[:, None],
+        DO + off_b * stride_b + offs_m_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
+        mask=offs_m_ld[:, None] < N,
         other=0.0,
     )
 
-    # Load per-row L and Delta for this Q-block.
-    # CONCERN 10: scalar 1-D gl.load from row_layout slice.
-    l_i = gl.load(L + off_b * N + offs_m, mask=m_mask, other=0.0)
-    delta = gl.load(Delta + off_b * N + offs_m, mask=m_mask, other=0.0)
+    # Load per-row L and Delta for this Q-block (broadcast over BLOCK_N columns).
+    l_i = gl.load(L + off_b * N + offs_m_ac, mask=offs_m_ac < N, other=0.0)
+    delta = gl.load(Delta + off_b * N + offs_m_ac, mask=offs_m_ac < N, other=0.0)
 
     dq = gl.full([BLOCK_M, D], 0.0, gl.float32, acc_layout)
 
     hi = (start_m + 1) * BLOCK_M if CAUSAL else N
     for start_n in range(0, hi, BLOCK_N):
-        offs_n = start_n + gl.arange(0, BLOCK_N, layout=row_layout)
-        n_mask = offs_n < N
+        # KV (BLOCK_N) indices: as a load-tile row, a transposed-load column,
+        # and an acc column.
+        offs_n_ld = start_n + gl.arange(0, BLOCK_N, gl.SliceLayout(1, load_layout))
+        offs_n_c = start_n + gl.arange(0, BLOCK_N, gl.SliceLayout(0, load_layout))
+        offs_n_ac = start_n + gl.arange(0, BLOCK_N, gl.SliceLayout(0, acc_layout))
 
         # Load K tile: (BLOCK_N, D). V is only needed in transposed form (vt_tile).
         k_tile = gl.load(
-            K + off_b * stride_b + offs_n[:, None] * stride_n + offs_d[None, :] * stride_d,
-            mask=n_mask[:, None],
+            K + off_b * stride_b + offs_n_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
+            mask=offs_n_ld[:, None] < N,
             other=0.0,
         )
 
-        # S = Q @ K^T: (BLOCK_M, BLOCK_N).
-        # CONCERN 6 (dq variant): K^T loaded with transposed strides
-        # (offs_d[:, None], offs_n[None, :]) arriving as (D, BLOCK_N) in rhs.
+        # S = Q @ K^T: (BLOCK_M, BLOCK_N). K^T loaded transposed as (D, BLOCK_N).
         kt_tile = gl.load(
-            K + off_b * stride_b + offs_d[:, None] * stride_d + offs_n[None, :] * stride_n,
-            mask=n_mask[None, :],
+            K + off_b * stride_b + offs_d_r[:, None] * stride_d + offs_n_c[None, :] * stride_n,
+            mask=offs_n_c[None, :] < N,
             other=0.0,
         )
         qk = mma_v2(
@@ -573,24 +467,22 @@ def _attn_bwd_dq_kernel(
         qk = qk * sm_scale  # S scaled
 
         # P = exp(S - L): broadcast L across BLOCK_N columns.
-        # CONCERN 11: l_i[:, None] broadcast across acc_layout tile.
         p = gl.exp(qk - l_i[:, None])
 
         # Padding + causal mask.
-        valid = n_mask[None, :] & m_mask[:, None]
+        valid = (offs_n_ac[None, :] < N) & (offs_m_ac[:, None] < N)
         if CAUSAL:
-            valid = valid & (offs_m[:, None] >= offs_n[None, :])
+            valid = valid & (offs_m_ac[:, None] >= offs_n_ac[None, :])
         p = gl.where(
             valid,
             p,
             gl.full([BLOCK_M, BLOCK_N], 0.0, gl.float32, acc_layout),
         )
 
-        # dP = dO @ V^T: (BLOCK_M, BLOCK_N).
-        # CONCERN 7 (dq variant): V^T loaded with transposed strides.
+        # dP = dO @ V^T: (BLOCK_M, BLOCK_N). V^T loaded transposed as (D, BLOCK_N).
         vt_tile = gl.load(
-            V + off_b * stride_b + offs_d[:, None] * stride_d + offs_n[None, :] * stride_n,
-            mask=n_mask[None, :],
+            V + off_b * stride_b + offs_d_r[:, None] * stride_d + offs_n_c[None, :] * stride_n,
+            mask=offs_n_c[None, :] < N,
             other=0.0,
         )
         dp = mma_v2(
@@ -600,11 +492,9 @@ def _attn_bwd_dq_kernel(
         )
 
         # dS = P * (dP - Delta) * sm_scale.
-        # CONCERN 11: delta[:, None] broadcast across acc_layout tile.
         ds = p * (dp - delta[:, None]) * sm_scale
 
         # dQ += dS @ K: (BLOCK_M, D).
-        # CONCERN 14: ds.to(gl.float16) on acc_layout before mma_v2.
         dq = mma_v2(
             gl.convert_layout(ds.to(gl.float16), lhs_layout),
             gl.convert_layout(k_tile, rhs_layout),
@@ -612,12 +502,11 @@ def _attn_bwd_dq_kernel(
         )
 
     # Store dq: (BLOCK_M, D).
-    # CONCERN 13: gl.store of (BLOCK_M, D) acc_layout tile with m_mask.
     dq_out = gl.convert_layout(dq.to(gl.float16), load_layout)
     gl.store(
-        DQ + off_b * stride_b + offs_m[:, None] * stride_n + offs_d[None, :] * stride_d,
+        DQ + off_b * stride_b + offs_m_ld[:, None] * stride_n + offs_d_c[None, :] * stride_d,
         dq_out,
-        mask=m_mask[:, None],
+        mask=offs_m_ld[:, None] < N,
     )
 
 
@@ -666,17 +555,10 @@ class _Attention(torch.autograd.Function):
             parent=acc_layout, operand_index=1, k_width=8
         )
         # load_layout: 2-D BlockedLayout for Q/K/V/O tiles. 4 threads/col,
-        # 8 elements per thread matches the fp16 16B coalescing target.
+        # 8 elements per thread matches the fp16 16B coalescing target. Every
+        # 1-D index is derived inside the kernel as a SliceLayout of this or
+        # acc_layout, so no standalone row/col layouts are passed.
         load_layout = gl.BlockedLayout([1, 8], [4, 8], [_NUM_WARPS, 1], [1, 0])
-        # row_layout: 1-D BlockedLayout for BLOCK_M-length row vectors
-        # (m_i, l_i, alpha, lse, offs_m).
-        row_layout = gl.BlockedLayout(
-            [1], [32], [_NUM_WARPS], [0]
-        )
-        # col_layout: 1-D BlockedLayout for D-length column vectors (offs_d).
-        col_layout = gl.BlockedLayout(
-            [1], [32], [_NUM_WARPS], [0]
-        )
 
         grid = (math.ceil(n / _BLOCK), b)
         _attn_fwd_kernel[grid](
@@ -691,8 +573,6 @@ class _Attention(torch.autograd.Function):
             lhs_layout=lhs_layout,
             rhs_layout=rhs_layout,
             load_layout=load_layout,
-            row_layout=row_layout,
-            col_layout=col_layout,
             num_warps=_NUM_WARPS,
         )
 
@@ -759,8 +639,6 @@ class _Attention(torch.autograd.Function):
             parent=acc_layout, operand_index=1, k_width=8
         )
         load_layout = gl.BlockedLayout([1, 8], [4, 8], [_NUM_WARPS, 1], [1, 0])
-        row_layout = gl.BlockedLayout([1], [32], [_NUM_WARPS], [0])
-        col_layout = gl.BlockedLayout([1], [32], [_NUM_WARPS], [0])
 
         grid_m = (math.ceil(n / _BLOCK), b)
         grid_n = (math.ceil(n / _BLOCK), b)
@@ -772,8 +650,6 @@ class _Attention(torch.autograd.Function):
             n,
             BLOCK_M=_BLOCK, D=d,
             load_layout=load_layout,
-            row_layout=row_layout,
-            col_layout=col_layout,
             num_warps=_NUM_WARPS,
         )
 
@@ -789,8 +665,6 @@ class _Attention(torch.autograd.Function):
             lhs_layout_nt=lhs_layout_nt,
             rhs_layout_nt=rhs_layout_nt,
             load_layout=load_layout,
-            row_layout=row_layout,
-            col_layout=col_layout,
             num_warps=_NUM_WARPS,
         )
 
@@ -803,8 +677,6 @@ class _Attention(torch.autograd.Function):
             lhs_layout=lhs_layout,
             rhs_layout=rhs_layout,
             load_layout=load_layout,
-            row_layout=row_layout,
-            col_layout=col_layout,
             num_warps=_NUM_WARPS,
         )
 
@@ -820,8 +692,8 @@ def attention(q, k, v, causal=False, sm_scale=None):
     """FlashAttention over 4-D (Z, H, N, D) tensor-core tensors (Gluon, differentiable).
 
     Mirrors the Triton twin in triton_impl/attention.py. Forward and backward
-    both use Gluon kernels. STATUS: static-checked only, not GPU-run; see
-    module-level CONCERNS for the full list of unverified gl.* calls.
+    both use Gluon kernels. GPU-verified against torch SDPA / autograd; see
+    the module docstring for the SliceLayout discipline that makes it express.
 
     Args:
         q: (Z, H, N, D) CUDA tensor, float16 or bfloat16.
