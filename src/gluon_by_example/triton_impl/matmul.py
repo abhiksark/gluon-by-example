@@ -12,7 +12,10 @@ from gluon_by_example._validation import check_matmul_inputs
 # paying for itself. The first config sits at 96KB of the 99KB CC 8.6 shared
 # memory budget (the pipeliner buffers num_stages - 1 tiles); on cards with
 # less shared memory the autotuner silently scores failing configs as inf
-# and skips them, so the list degrades gracefully rather than crashing.
+# and skips them, so the list degrades gracefully rather than crashing. AMD
+# matrix cores run these NVIDIA-tuned configs but will want their own block
+# (64-wide wavefront, LDS budget) to actually perform; see
+# benchmarks/amd-readiness.md.
 _CONFIGS = [
     triton.Config(
         {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_M": 8},
